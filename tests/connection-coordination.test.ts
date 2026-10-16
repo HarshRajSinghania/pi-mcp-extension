@@ -244,3 +244,38 @@ it("still reconnects after health failure when no external stop occurs", async (
     assert.equal(recoveryStarts, 1);
   } finally { await manager.shutdownAll(); }
 });
+
+it("deactivates tools and reconnects when the server process dies unexpectedly", async () => {
+  const manager = new ServerManager(config());
+  const stopped = gate();
+  let stoppedCalls = 0;
+  manager.setServerStoppedCallback(() => { stoppedCalls++; stopped.release(); });
+  try {
+    await manager.startServer("lazy", process.cwd());
+    const firstClient = manager.getServer("lazy")!.client! as any;
+    const firstPid = firstClient.transport.pid as number;
+    assert.ok(firstPid);
+    process.kill(firstPid, "SIGKILL");
+    await stopped.promise;
+    assert.equal(stoppedCalls, 1);
+    for (let i = 0; i < 500 && manager.getServer("lazy")?.state !== "ready"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(manager.getServer("lazy")?.state, "ready");
+    assert.notEqual(manager.getServer("lazy")?.client, firstClient);
+  } finally { await manager.shutdownAll(); }
+});
+
+it("does not reconnect after a deliberate stop", async () => {
+  const manager = new ServerManager(config());
+  try {
+    await manager.startServer("lazy", process.cwd());
+    let recoveryStarts = 0;
+    const originalStart = manager.startServer.bind(manager);
+    manager.startServer = async (...args) => { recoveryStarts++; return originalStart(...args); };
+    await manager.stopServer("lazy");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(recoveryStarts, 0);
+    assert.equal(manager.getServer("lazy")?.state, "stopped");
+  } finally { await manager.shutdownAll(); }
+});

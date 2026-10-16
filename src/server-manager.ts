@@ -369,20 +369,19 @@ export class ServerManager {
           try { await client.ping(); }
           catch {
             if (signal.aborted) return;
-            const recoveryGeneration = (server.generation ?? 0) + 1;
-            await this._shutdown(server);
-            if (server.generation === recoveryGeneration) {
-              // An external stop during cleanup increments the generation again.
-              queueMicrotask(() => {
-                if (server.generation !== recoveryGeneration) return;
-                void this.startServer(server.name, cwd).catch((error) => {
-                  server.lastError = error instanceof Error ? error : new Error(String(error));
-                });
-              });
-            }
+            await this._recover(server, cwd);
           }
         }, server.config.healthCheckIntervalMs);
       }
+      // Unexpected transport close (e.g. the server subprocess crashes
+      // mid-session). Without this the state would stay "ready" and tools
+      // would remain active against a dead server. Deliberate closes abort
+      // the signal first, so they are ignored here.
+      client.onclose = () => {
+        if (signal.aborted || server.client !== client) return;
+        console.error(`[pi-mcp] Server ${server.name} closed unexpectedly, reconnecting`);
+        void this._recover(server, cwd);
+      };
     } catch (err) {
       try { await client.close(); } catch { /* best effort */ }
       if (server.client === client) { server.client = null; server.childPid = null; }
@@ -407,6 +406,21 @@ export class ServerManager {
       });
       if (signal.aborted) throw new Error("Connection cancelled");
       return this._connect(server, cwd, signal);
+    }
+  }
+
+  /** Tear down a server that died or stopped responding, then reconnect. */
+  private async _recover(server: ManagedServer, cwd: string): Promise<void> {
+    const recoveryGeneration = (server.generation ?? 0) + 1;
+    await this._shutdown(server);
+    if (server.generation === recoveryGeneration) {
+      // An external stop during cleanup increments the generation again.
+      queueMicrotask(() => {
+        if (server.generation !== recoveryGeneration) return;
+        void this.startServer(server.name, cwd).catch((error) => {
+          server.lastError = error instanceof Error ? error : new Error(String(error));
+        });
+      });
     }
   }
 
