@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   convertJsonSchemaToTypebox,
   buildToolName,
+  convertMcpContent,
   ToolBridge,
   listAllTools,
 } from "../src/tool-bridge.js";
@@ -375,6 +376,113 @@ describe("ToolBridge", () => {
 
     const tool = registeredTools[0];
     assert.ok(tool.description.includes("⚠️ destructive"));
+  });
+
+  it("passes through MCP image content and filters non-text blocks on isError", async () => {
+    const registeredTools: any[] = [];
+    let activeTools: string[] = [];
+    const mockPi = {
+      registerTool: (t: any) => registeredTools.push(t),
+      getActiveTools: () => activeTools,
+      setActiveTools: (names: string[]) => { activeTools = names; },
+    };
+
+    let callResponse: any = {
+      content: [
+        { type: "text", text: "Screenshot captured" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+      isError: false,
+    };
+
+    const mockClient = {
+      request: async (req: any) => {
+        if (req.method === "tools/list") {
+          return {
+            tools: [{
+              name: "screenshot",
+              description: "Take a screenshot",
+              inputSchema: { type: "object", properties: {}, required: [] },
+            }],
+          };
+        }
+        return callResponse;
+      },
+    } as any;
+
+    const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
+    const bridge = new ToolBridge(settings, mockPi as any);
+    await bridge.refreshTools("myserver", mockClient);
+
+    const tool = registeredTools[0];
+    const okResult = await tool.execute("call-1", {}, undefined, undefined, undefined);
+    assert.deepEqual(okResult.content, [
+      { type: "text", text: "Screenshot captured" },
+      { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+    ]);
+
+    // When isError is true with mixed image + text content, only text blocks form the error message
+    callResponse = {
+      content: [
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+        { type: "text", text: "Render failed" },
+      ],
+      isError: true,
+    };
+    await assert.rejects(
+      () => tool.execute("call-2", {}, undefined, undefined, undefined),
+      (err: any) => {
+        assert.equal(err.message, "Render failed");
+        assert.equal(err.code, "tool");
+        return true;
+      },
+    );
+
+    // When isError is true with only image content, falls back to "Tool reported an error"
+    callResponse = {
+      content: [
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+      isError: true,
+    };
+    await assert.rejects(
+      () => tool.execute("call-3", {}, undefined, undefined, undefined),
+      (err: any) => {
+        assert.equal(err.message, "Tool reported an error");
+        assert.equal(err.code, "tool");
+        return true;
+      },
+    );
+  });
+});
+
+// ── Content Conversion ────────────────────────────────────────────────────────
+
+describe("convertMcpContent", () => {
+  it("passes through image blocks as PiImageContent", () => {
+    const out = convertMcpContent([
+      { type: "image", data: "YWJj", mimeType: "image/jpeg" },
+      { type: "image", data: "ZGVm" },
+    ]);
+    assert.deepEqual(out, [
+      { type: "image", data: "YWJj", mimeType: "image/jpeg" },
+      { type: "image", data: "ZGVm", mimeType: "image/png" },
+    ]);
+  });
+
+  it("converts text, audio, and resource blocks to PiTextContent", () => {
+    const out = convertMcpContent([
+      { type: "text", text: "hello" },
+      { type: "audio", mimeType: "audio/wav", data: "AAA=" },
+      { type: "resource", resource: { uri: "file:///a.txt", text: "file body" } },
+      { type: "resource", resource: { uri: "file:///b.bin", blob: "BBB=" } },
+    ]);
+    assert.deepEqual(out, [
+      { type: "text", text: "hello" },
+      { type: "text", text: "[Audio: audio/wav, base64 encoded]" },
+      { type: "text", text: "file body" },
+      { type: "text", text: "[Resource blob: file:///b.bin]" },
+    ]);
   });
 });
 

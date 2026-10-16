@@ -226,7 +226,7 @@ export function buildToolName(prefix: string, serverName: string, toolName: stri
 type PiTextContent = { type: "text"; text: string };
 type PiImageContent = { type: "image"; data: string; mimeType: string };
 
-function convertMcpContent(items: unknown[]): (PiTextContent | PiImageContent)[] {
+export function convertMcpContent(items: unknown[]): (PiTextContent | PiImageContent)[] {
   return items.map((item: any) => {
     if (!item || typeof item !== "object") {
       return { type: "text", text: String(item) };
@@ -448,7 +448,8 @@ export class ToolBridge {
           // Tool execution errors (isError: true) — distinct from protocol errors
           if (result.isError) {
             const errorText = content
-              .map((c) => (c.type === "text" ? c.text : ""))
+              .filter((c): c is PiTextContent => c.type === "text")
+              .map((c) => c.text)
               .join("\n");
             throw new McpError(
               errorText || "Tool reported an error",
