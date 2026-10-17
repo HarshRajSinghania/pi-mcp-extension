@@ -43,7 +43,16 @@ pi -e npm:pi-mcp-extension
    pi install npm:pi-mcp-extension
    ```
 
-2. Create a config file at `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project-level):
+2. *(Pi 1.x)* Disable Pi's built-in `mcp` extension so Pi does not warn that both extensions are enabled at the same time — either run `pi config` and uncheck `mcp` under **Built-in extensions**, or add `"extensions": ["-builtin:mcp"]` to `~/.pi/agent/settings.json`:
+   ```jsonc
+   {
+     "extensions": [
+       "-builtin:mcp"
+     ]
+   }
+   ```
+
+3. Create a config file at `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project-level):
    ```jsonc
    {
      "mcpServers": {
@@ -56,7 +65,7 @@ pi -e npm:pi-mcp-extension
    }
    ```
 
-3. Start Pi — your MCP tools are ready. Use `/mcp` to check server status.
+4. Start Pi — your MCP tools are ready. Use `/mcp` to check server status.
 
 ## Configuration
 
