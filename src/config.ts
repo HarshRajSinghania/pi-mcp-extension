@@ -40,64 +40,100 @@ const AuthConfigSchema = z.object({
   clientSecret: z.string().optional(),
 });
 
-const ServerConfigSchema = z
-  .object({
-    /** Executable to spawn (e.g. "npx", "node", "uvx"). Required for stdio. */
-    command: z.string().optional(),
-    /** Arguments passed to command. */
-    args: z.array(z.string()).default([]),
-    /**
-     * Extra environment variables passed to the child process as literals.
-     * These merge with process.env; project env overrides parent env.
-     * No ${VAR} interpolation — set vars in your shell environment instead.
-     */
-    env: z.record(z.string()).optional(),
-    /** Transport protocol. Default: "stdio". */
-    transport: z.enum(["stdio", "streamable-http", "sse"]).default("stdio"),
-    /**
-     * URL for streamable-http or sse transports.
-     * Must be a valid URL (e.g. "https://my-mcp-server.example.com/mcp").
-     */
-    url: z.string().url().optional(),
-    /**
-     * Static HTTP headers to include with every request (streamable-http / sse only).
-     * Useful for API-key-based auth (e.g. { "Authorization": "Bearer <key>" }).
-     * For OAuth2, use the "auth" field instead.
-     */
-    headers: z.record(z.string()).optional(),
-    /**
-     * OAuth2 configuration for servers that require authorization.
-     * When set, the transport will use the SDK's OAuth flow (discovery,
-     * dynamic client registration, PKCE, token refresh).
-     * Only applies to streamable-http and sse transports.
-     */
-    auth: AuthConfigSchema.optional(),
-    /**
-     * "eager" — start at session_start.
-     * "lazy"  — start manually via /mcp:start command.
-     */
-    lifecycle: z.enum(["eager", "lazy"]).default("lazy"),
-    /** Per-request timeout in ms. Overrides global setting. Default: 30000. */
-    requestTimeoutMs: z.number().positive().optional(),
-    /**
-     * Opt-in heartbeat interval (ping) in ms.
-     * Only useful for long-lived connections where you want proactive liveness checks.
-     * Default: disabled.
-     */
-    healthCheckIntervalMs: z.number().positive().optional(),
-  })
-  .refine(
-    (cfg) => {
-      if (cfg.transport === "stdio") return cfg.command !== undefined;
-      return cfg.url !== undefined;
-    },
-    (cfg) => ({
-      message:
-        cfg.transport === "stdio"
-          ? `"command" is required for stdio transport`
-          : `"url" is required for ${cfg.transport} transport`,
-    }),
-  );
+export const ServerConfigSchema = z.preprocess(
+  (raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const obj = { ...(raw as Record<string, unknown>) };
+    const rawTransport = obj.transport ?? obj.type;
+    if (rawTransport === "http") {
+      obj.transport = "streamable-http";
+    } else if (obj.transport === undefined && rawTransport !== undefined) {
+      obj.transport = rawTransport;
+    } else if (obj.transport === undefined && obj.url !== undefined && obj.command === undefined) {
+      obj.transport = "streamable-http";
+    }
+    if (obj.auth === undefined && obj.oauth && typeof obj.oauth === "object" && !Array.isArray(obj.oauth)) {
+      const oauth = obj.oauth as Record<string, unknown>;
+      const redirectUrl =
+        typeof oauth.redirectUrl === "string"
+          ? oauth.redirectUrl
+          : typeof oauth.callbackUrl === "string"
+            ? oauth.callbackUrl
+            : typeof oauth.callbackPort === "number"
+              ? `http://127.0.0.1:${oauth.callbackPort}/callback`
+              : undefined;
+      obj.auth = {
+        type: "oauth",
+        ...(redirectUrl !== undefined ? { redirectUrl } : {}),
+        ...(typeof oauth.scope === "string" ? { scope: oauth.scope } : {}),
+        ...(typeof oauth.clientId === "string" ? { clientId: oauth.clientId } : {}),
+        ...(typeof oauth.clientSecret === "string" ? { clientSecret: oauth.clientSecret } : {}),
+      };
+    }
+    if (obj.requestTimeoutMs === undefined && typeof obj.timeout === "number" && obj.timeout > 0) {
+      obj.requestTimeoutMs = obj.timeout * 1000;
+    }
+    return obj;
+  },
+  z
+    .object({
+      /** Executable to spawn (e.g. "npx", "node", "uvx"). Required for stdio. */
+      command: z.string().optional(),
+      /** Arguments passed to command. */
+      args: z.array(z.string()).default([]),
+      /**
+       * Extra environment variables passed to the child process as literals.
+       * These merge with process.env; project env overrides parent env.
+       * No ${VAR} interpolation — set vars in your shell environment instead.
+       */
+      env: z.record(z.string()).optional(),
+      /** Transport protocol. Default: "stdio" (or "streamable-http" when "url" is provided). */
+      transport: z.enum(["stdio", "streamable-http", "sse"]).default("stdio"),
+      /**
+       * URL for streamable-http or sse transports.
+       * Must be a valid URL (e.g. "https://my-mcp-server.example.com/mcp").
+       */
+      url: z.string().url().optional(),
+      /**
+       * Static HTTP headers to include with every request (streamable-http / sse only).
+       * Useful for API-key-based auth (e.g. { "Authorization": "Bearer <key>" }).
+       * For OAuth2, use the "auth" field instead.
+       */
+      headers: z.record(z.string()).optional(),
+      /**
+       * OAuth2 configuration for servers that require authorization.
+       * When set, the transport will use the SDK's OAuth flow (discovery,
+       * dynamic client registration, PKCE, token refresh).
+       * Only applies to streamable-http and sse transports.
+       */
+      auth: AuthConfigSchema.optional(),
+      /**
+       * "eager" — start at session_start.
+       * "lazy"  — start manually via /mcp:start command.
+       */
+      lifecycle: z.enum(["eager", "lazy"]).default("lazy"),
+      /** Per-request timeout in ms. Overrides global setting. Default: 30000. */
+      requestTimeoutMs: z.number().positive().optional(),
+      /**
+       * Opt-in heartbeat interval (ping) in ms.
+       * Only useful for long-lived connections where you want proactive liveness checks.
+       * Default: disabled.
+       */
+      healthCheckIntervalMs: z.number().positive().optional(),
+    })
+    .refine(
+      (cfg) => {
+        if (cfg.transport === "stdio") return cfg.command !== undefined;
+        return cfg.url !== undefined;
+      },
+      (cfg) => ({
+        message:
+          cfg.transport === "stdio"
+            ? `"command" is required for stdio transport`
+            : `"url" is required for ${cfg.transport} transport`,
+      }),
+    ),
+);
 
 const SettingsSchema = z.object({
   /**
@@ -145,6 +181,16 @@ export type ServerConfig = z.output<typeof ServerConfigSchema>;
 export type Settings = z.output<typeof SettingsSchema>;
 export type McpConfig = z.output<typeof McpConfigSchema>;
 
+export interface LoadConfigOptions {
+  /**
+   * Whether to read project-level `<cwd>/.pi/mcp.json`.
+   * Set to `false` when the project is untrusted (`ctx.isProjectTrusted() === false`)
+   * or during bootstrap before session trust is resolved.
+   * Default: `true`.
+   */
+  includeProjectConfig?: boolean;
+}
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 async function readJsonFile(path: string): Promise<unknown | null> {
@@ -181,6 +227,36 @@ function parseWith<S extends z.ZodTypeAny>(
   return result.data;
 }
 
+/**
+ * Parse and normalize a server configuration registered via `pi.registerMcpServer()`.
+ * Extension-registered servers default to `lifecycle: "eager"` (unless `enabled: false`
+ * or `lifecycle` is explicitly specified) so they connect on `session_start` / `mcp_servers_change`.
+ */
+export function parseRegisteredServerConfig(
+  name: string,
+  raw: unknown,
+  sourcePath = "<extension>",
+): ServerConfig {
+  const rawObj = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : undefined;
+  const withLifecycle = rawObj && rawObj.lifecycle === undefined
+    ? { ...rawObj, lifecycle: rawObj.enabled === false ? "lazy" : "eager" }
+    : raw;
+  const result = ServerConfigSchema.safeParse(withLifecycle);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  mcpServers.${name}${i.path.length ? `.${i.path.join(".")}` : ""}: ${i.message}`)
+      .join("\n");
+    throw new McpError(
+      `Invalid MCP server "${name}" from ${sourcePath}:\n${issues}`,
+      name,
+      "config",
+    );
+  }
+  return result.data;
+}
+
 function mergeConfigs(
   globalCfg: McpConfig,
   projectCfg: ProjectConfig,
@@ -199,7 +275,7 @@ function mergeConfigs(
 
 /**
  * Pi's agent directory, resolved the way Pi resolves it (`getAgentDir()` in
- * @mariozechner/pi-coding-agent): $PI_CODING_AGENT_DIR when set (tilde expanded), else
+ * @earendil-works/pi-coding-agent): $PI_CODING_AGENT_DIR when set (tilde expanded), else
  * ~/.pi/agent. Pi profiles and alternative agent dirs only work through that variable.
  */
 export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -214,15 +290,20 @@ export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
 
 /**
  * Load and merge global (<agent dir>/mcp.json) and project (<cwd>/.pi/mcp.json) configs.
- * Project config takes precedence over global config.
+ * Project config takes precedence over global config when `options.includeProjectConfig !== false`.
  * Returns a fully validated, merged config.
  */
-export async function loadConfig(cwd: string, globalPath = join(agentDir(), "mcp.json")): Promise<McpConfig> {
+export async function loadConfig(
+  cwd: string,
+  globalPath = join(agentDir(), "mcp.json"),
+  options?: LoadConfigOptions,
+): Promise<McpConfig> {
+  const includeProjectConfig = options?.includeProjectConfig !== false;
   const projectPath = join(cwd, ".pi", "mcp.json");
 
   const [globalRaw, projectRaw] = await Promise.all([
     readJsonFile(globalPath),
-    readJsonFile(projectPath),
+    includeProjectConfig ? readJsonFile(projectPath) : Promise.resolve(null),
   ]);
 
   // If neither file exists, return an empty valid config

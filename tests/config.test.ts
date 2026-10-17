@@ -9,12 +9,13 @@ import { tmpdir } from "node:os";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { agentDir, loadConfig as loadConfigFile } from "../src/config.js";
+import { agentDir, loadConfig as loadConfigFile, parseRegisteredServerConfig } from "../src/config.js";
 import { McpError } from "../src/errors.js";
 
 // ── Helpers ─
 
-const loadConfig = (dir: string) => loadConfigFile(dir, join(dir, "isolated-global-mcp.json"));
+const loadConfig = (dir: string, options?: { includeProjectConfig?: boolean }) =>
+  loadConfigFile(dir, join(dir, "isolated-global-mcp.json"), options);
 
 async function withTempDir(
   fn: (dir: string) => Promise<void>,
@@ -400,4 +401,155 @@ describe("loadConfig with PI_CODING_AGENT_DIR", () => {
       await assert.rejects(loadConfigFile(cwd), McpError);
     });
   });
+
+  it("ignores <cwd>/.pi/mcp.json when includeProjectConfig is false", async () => {
+    await withAgentDir(async (agent, cwd) => {
+      await writeFile(
+        join(agent, "mcp.json"),
+        JSON.stringify({
+          settings: { toolPrefix: "global_mcp", requestTimeoutMs: 25000 },
+          mcpServers: { safe: { command: "safe-cmd" } },
+        }),
+      );
+      // Untrusted project file with malicious server + invalid setting override
+      await writeMcpJson(cwd, {
+        settings: { toolPrefix: "untrusted_mcp", requestTimeoutMs: 1000 },
+        mcpServers: { pwn: { command: "sh", args: ["-c", "evil"], lifecycle: "eager" } },
+      });
+
+      const cfg = await loadConfigFile(cwd, undefined, { includeProjectConfig: false });
+      assert.equal(cfg.settings.toolPrefix, "global_mcp");
+      assert.equal(cfg.settings.requestTimeoutMs, 25000);
+      assert.deepEqual(Object.keys(cfg.mcpServers), ["safe"]);
+      assert.equal(cfg.mcpServers["pwn"], undefined);
+    });
+  });
+
+  it("does not read or fail on malformed <cwd>/.pi/mcp.json when includeProjectConfig is false", async () => {
+    await withTempDir(async (dir) => {
+      const piDir = join(dir, ".pi");
+      await mkdir(piDir, { recursive: true });
+      await writeFile(join(piDir, "mcp.json"), "{ invalid json from untrusted repo");
+
+      const cfg = await loadConfig(dir, { includeProjectConfig: false });
+      assert.deepEqual(cfg.mcpServers, {});
+    });
+  });
 });
+
+describe("Pi 1.x server schema compatibility", () => {
+  it("infers streamable-http transport when url is provided without transport or command", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: {
+          sentry: {
+            url: "https://mcp.sentry.dev/mcp",
+          },
+        },
+      });
+      const cfg = await loadConfig(dir);
+      const server = cfg.mcpServers["sentry"];
+      assert.ok(server);
+      assert.equal(server.transport, "streamable-http");
+      assert.equal(server.url, "https://mcp.sentry.dev/mcp");
+      assert.equal(server.lifecycle, "lazy");
+    });
+  });
+
+  it("accepts type: 'http' and transport: 'http' as aliases for streamable-http", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: {
+          viaType: {
+            type: "http",
+            url: "https://example.com/mcp-type",
+          },
+          viaTransport: {
+            transport: "http",
+            url: "https://example.com/mcp-transport",
+          },
+          viaSseType: {
+            type: "sse",
+            url: "https://example.com/sse",
+          },
+          viaStdioType: {
+            type: "stdio",
+            command: "npx",
+            args: ["-y", "my-mcp"],
+          },
+        },
+      });
+      const cfg = await loadConfig(dir);
+      assert.equal(cfg.mcpServers["viaType"]?.transport, "streamable-http");
+      assert.equal(cfg.mcpServers["viaTransport"]?.transport, "streamable-http");
+      assert.equal(cfg.mcpServers["viaSseType"]?.transport, "sse");
+      assert.equal(cfg.mcpServers["viaStdioType"]?.transport, "stdio");
+      assert.equal(cfg.mcpServers["viaStdioType"]?.command, "npx");
+    });
+  });
+
+  it("maps Pi 1.x oauth object and timeout (seconds) to auth and requestTimeoutMs", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: {
+          withCallbackUrl: {
+            url: "https://example.com/mcp",
+            timeout: 45,
+            oauth: {
+              clientId: "cid-1",
+              clientSecret: "csec-1",
+              callbackUrl: "http://127.0.0.1:8888/cb",
+              scope: "read:all",
+            },
+          },
+          withCallbackPort: {
+            url: "https://example.com/mcp2",
+            oauth: {
+              callbackPort: 7777,
+            },
+          },
+        },
+      });
+      const cfg = await loadConfig(dir);
+      const s1 = cfg.mcpServers["withCallbackUrl"]!;
+      assert.equal(s1.transport, "streamable-http");
+      assert.equal(s1.requestTimeoutMs, 45000);
+      assert.deepEqual(s1.auth, {
+        type: "oauth",
+        clientId: "cid-1",
+        clientSecret: "csec-1",
+        redirectUrl: "http://127.0.0.1:8888/cb",
+        scope: "read:all",
+      });
+
+      const s2 = cfg.mcpServers["withCallbackPort"]!;
+      assert.deepEqual(s2.auth, {
+        type: "oauth",
+        redirectUrl: "http://127.0.0.1:7777/callback",
+      });
+    });
+  });
+
+  it("parseRegisteredServerConfig defaults lifecycle to eager unless enabled is false", () => {
+    const eagerDefault = parseRegisteredServerConfig("ext-http", {
+      url: "https://mcp.sentry.dev/mcp",
+    });
+    assert.equal(eagerDefault.transport, "streamable-http");
+    assert.equal(eagerDefault.lifecycle, "eager");
+
+    const disabledLazy = parseRegisteredServerConfig("ext-disabled", {
+      command: "node",
+      args: ["server.js"],
+      enabled: false,
+    });
+    assert.equal(disabledLazy.transport, "stdio");
+    assert.equal(disabledLazy.lifecycle, "lazy");
+
+    const explicitLazy = parseRegisteredServerConfig("ext-lazy", {
+      command: "node",
+      lifecycle: "lazy",
+    });
+    assert.equal(explicitLazy.lifecycle, "lazy");
+  });
+});
+

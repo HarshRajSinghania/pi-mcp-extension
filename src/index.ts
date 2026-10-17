@@ -7,8 +7,14 @@
  * Wires together: config → server manager → tool bridge → Pi API.
  */
 
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, ExtensionUIContext } from "@mariozechner/pi-coding-agent";
-import { loadConfig, type McpConfig } from "./config.js";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionCommandContext,
+  ExtensionUIContext,
+  RegisteredMcpServer,
+} from "@earendil-works/pi-coding-agent";
+import { loadConfig, parseRegisteredServerConfig, type McpConfig, type ServerConfig } from "./config.js";
 import { ServerManager } from "./server-manager.js";
 import { AuthLockError, AuthRequiredError } from "./oauth-provider.js";
 import * as Type from "typebox";
@@ -281,26 +287,73 @@ export function serverNameCompletions(
   return completions.length > 0 ? completions : null;
 }
 
+function collectRegisteredServers(
+  entries: readonly RegisteredMcpServer[],
+  fileServers: Record<string, ServerConfig>,
+  onError?: (err: unknown) => void,
+): Record<string, ServerConfig> {
+  const registered: Record<string, ServerConfig> = {};
+  for (const entry of entries) {
+    // Servers configured in mcp.json take precedence over extension-registered servers.
+    if (Object.prototype.hasOwnProperty.call(fileServers, entry.name)) {
+      continue;
+    }
+    try {
+      registered[entry.name] = parseRegisteredServerConfig(
+        entry.name,
+        entry.config,
+        entry.extensionPath || "<extension>",
+      );
+    } catch (err) {
+      onError?.(err);
+    }
+  }
+  return registered;
+}
+
+function mergeWithRegisteredServers(
+  fileConfig: McpConfig,
+  registeredServers: Record<string, ServerConfig>,
+): McpConfig {
+  return {
+    settings: fileConfig.settings,
+    mcpServers: {
+      ...registeredServers,
+      ...fileConfig.mcpServers,
+    },
+  };
+}
+
 export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void> } = {}): Promise<void> {
   // ── 1. Load and validate config ──────────────────────────────────────────
-  // cwd is available on the ExtensionContext passed to event handlers.
-  // We load config lazily on session_start to get the correct per-session cwd.
-  // For the initial load we use process.cwd() as a bootstrap path to detect
-  // whether any config exists at all.
-  let config: McpConfig;
+  // cwd and project trust are available on the ExtensionContext passed to event handlers.
+  // At bootstrap (before session_start) we load ONLY the global config so untrusted
+  // <cwd>/.pi/mcp.json files are never read before ctx.isProjectTrusted() is checked.
+  let fileConfig: McpConfig = {
+    settings: { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 },
+    mcpServers: {},
+  };
   try {
-    config = await loadConfig(paths.bootstrapCwd ?? process.cwd(), paths.globalConfigPath);
+    fileConfig = await loadConfig(paths.bootstrapCwd ?? process.cwd(), paths.globalConfigPath, {
+      includeProjectConfig: false,
+    });
   } catch (err) {
     // Can't notify yet (no ctx), so log to stderr. The session_start handler
     // will re-try with the real cwd and surface errors properly.
     console.error(`[pi-mcp] Config error: ${err instanceof McpError ? err.message : String(err)}`);
-    return;
   }
 
-  if (Object.keys(config.mcpServers).length === 0) {
-    // No servers configured — silently exit. Users can create mcp.json later.
-    return;
-  }
+  const getRegisteredEntries = (): RegisteredMcpServer[] =>
+    typeof (pi as { getMcpServers?: () => RegisteredMcpServer[] }).getMcpServers === "function"
+      ? pi.getMcpServers()
+      : [];
+
+  let extensionServers = collectRegisteredServers(
+    getRegisteredEntries(),
+    fileConfig.mcpServers,
+    (err) => console.error(`[pi-mcp] Config error: ${err instanceof McpError ? err.message : String(err)}`),
+  );
+  let config: McpConfig = mergeWithRegisteredServers(fileConfig, extensionServers);
 
   // ── 2. Initialize bridge components ──────────────────────────────────────
   const manager = new ServerManager(config, undefined, paths.authStorageDir);
@@ -391,6 +444,42 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     })();
   }
 
+  async function startEagerServers(
+    serversToStart: Array<[string, ServerConfig]>,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    const authRequiredServers = new Set<string>();
+
+    // Start all eager servers concurrently
+    await Promise.allSettled(
+      serversToStart.map(async ([name, cfg]) => {
+        try {
+          await manager.startServer(name, ctx.cwd);
+        } catch (err) {
+          if (err instanceof AuthRequiredError && cfg.auth && ctx.hasUI) {
+            authRequiredServers.add(name);
+            return;
+          }
+          const msg = formatErrorMessage(err);
+          ctx.ui.notify(`pi-mcp: Failed to start ${name} — ${msg}`, "error");
+        }
+      }),
+    );
+
+    for (const [name] of serversToStart) {
+      if (!authRequiredServers.has(name)) continue;
+      if (declinedStartupAuth.has(name)) {
+        ctx.ui.setStatus?.("pi-mcp", `run /mcp:auth ${name}`);
+        continue;
+      }
+      enqueueStartupAuthPrompt(name, ctx);
+    }
+
+    for (let i = 0; i < 4 * authRequiredServers.size; i++) {
+      await Promise.resolve();
+    }
+  }
+
   manager.setToolRefreshCallback(async (serverName, client) => {
     await bridge.refreshTools(serverName, client, () => {
       const server = manager.getServer(serverName);
@@ -401,17 +490,33 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
 
   // ── 3. Session lifecycle ──────────────────────────────────────────────────
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-    // Reload config with the real session cwd (project config may differ)
-    let sessionConfig = config;
+    // Only load project-level <cwd>/.pi/mcp.json when the project is trusted.
+    const includeProjectConfig =
+      typeof (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted === "function"
+        ? (ctx as { isProjectTrusted: () => boolean }).isProjectTrusted()
+        : true;
+
+    let nextFileConfig = fileConfig;
     try {
-      sessionConfig = await loadConfig(ctx.cwd, paths.globalConfigPath);
+      nextFileConfig = await loadConfig(ctx.cwd, paths.globalConfigPath, { includeProjectConfig });
     } catch (err) {
       const msg = formatErrorMessage(err);
       ctx.ui.notify(`pi-mcp: Config error — ${msg}`, "error");
       return;
     }
 
-    // If config changed (different cwd with project-level overrides),
+    fileConfig = nextFileConfig;
+    extensionServers = collectRegisteredServers(
+      getRegisteredEntries(),
+      fileConfig.mcpServers,
+      (err) => {
+        const msg = formatErrorMessage(err);
+        ctx.ui.notify(`pi-mcp: Config error — ${msg}`, "error");
+      },
+    );
+    const sessionConfig = mergeWithRegisteredServers(fileConfig, extensionServers);
+
+    // If config changed (different cwd with project-level overrides or registered servers),
     // shut down old servers and rebuild the manager's server list
     if (JSON.stringify(sessionConfig) !== JSON.stringify(config)) {
       declinedStartupAuth.clear();
@@ -426,6 +531,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       // Shut down all running servers
       await manager.shutdownAll();
       // Rebuild server entries from new config
+      bridge.updateSettings(sessionConfig.settings);
       manager.rebuildServers(sessionConfig);
       config = sessionConfig;
     }
@@ -434,35 +540,56 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       ([, cfg]) => cfg.lifecycle === "eager",
     );
 
-    const authRequiredServers = new Set<string>();
+    await startEagerServers(eagerServers, ctx);
+  });
 
-    // Start all eager servers concurrently
-    await Promise.allSettled(
-      eagerServers.map(async ([name, cfg]) => {
-        try {
-          await manager.startServer(name, ctx.cwd);
-        } catch (err) {
-          if (err instanceof AuthRequiredError && cfg.auth && ctx.hasUI) {
-            authRequiredServers.add(name);
-            return;
-          }
-          const msg = formatErrorMessage(err);
-          ctx.ui.notify(`pi-mcp: Failed to start ${name} — ${msg}`, "error");
-        }
-      }),
+  // Connect or disconnect MCP servers registered dynamically via pi.registerMcpServer().
+  pi.on("mcp_servers_change", async (event, ctx: ExtensionContext) => {
+    const entries = Array.isArray((event as { servers?: unknown })?.servers)
+      ? ((event as { servers: RegisteredMcpServer[] }).servers)
+      : getRegisteredEntries();
+
+    const nextExtensionServers = collectRegisteredServers(
+      entries,
+      fileConfig.mcpServers,
+      (err) => {
+        const msg = formatErrorMessage(err);
+        ctx.ui.notify(`pi-mcp: Config error — ${msg}`, "error");
+      },
     );
 
-    for (const [name] of eagerServers) {
-      if (!authRequiredServers.has(name)) continue;
-      if (declinedStartupAuth.has(name)) {
-        ctx.ui.setStatus?.("pi-mcp", `run /mcp:auth ${name}`);
-        continue;
+    const removedOrChanged: string[] = [];
+    for (const [name, prevCfg] of Object.entries(extensionServers)) {
+      const nextCfg = nextExtensionServers[name];
+      if (!nextCfg || JSON.stringify(prevCfg) !== JSON.stringify(nextCfg)) {
+        removedOrChanged.push(name);
       }
-      enqueueStartupAuthPrompt(name, ctx);
     }
 
-    for (let i = 0; i < 4 * authRequiredServers.size; i++) {
-      await Promise.resolve();
+    for (const name of removedOrChanged) {
+      declinedStartupAuth.delete(name);
+      startupPromptControllers.get(name)?.abort();
+      startupPromptControllers.delete(name);
+      connectAttempts.get(name)?.controller.abort();
+      bridge.removeServer(name);
+      await manager.removeServer(name);
+    }
+
+    const addedEager: Array<[string, ServerConfig]> = [];
+    for (const [name, nextCfg] of Object.entries(nextExtensionServers)) {
+      if (!manager.getServer(name)) {
+        manager.setServer(name, nextCfg);
+        if (nextCfg.lifecycle === "eager") {
+          addedEager.push([name, nextCfg]);
+        }
+      }
+    }
+
+    extensionServers = nextExtensionServers;
+    config = mergeWithRegisteredServers(fileConfig, extensionServers);
+
+    if (addedEager.length > 0) {
+      await startEagerServers(addedEager, ctx);
     }
   });
 

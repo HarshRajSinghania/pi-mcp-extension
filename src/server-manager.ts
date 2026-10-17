@@ -256,6 +256,30 @@ export class ServerManager {
     );
   }
 
+  /** Add or replace a stopped server entry in the manager. */
+  setServer(name: string, serverConfig: ServerConfig): void {
+    this.servers.set(name, {
+      name,
+      config: serverConfig,
+      state: "stopped",
+      client: null,
+      childPid: null,
+      retryCount: 0,
+      lastError: null,
+      stderrLog: [],
+      healthCheckTimer: null,
+      retryTimer: null,
+    });
+  }
+
+  /** Shut down and remove a server entry from the manager. */
+  async removeServer(name: string): Promise<void> {
+    const server = this.servers.get(name);
+    if (!server) return;
+    await this._shutdown(server);
+    this.servers.delete(name);
+  }
+
   /**
    * Rebuild the server map from a new config.
    * Must only be called after shutdownAll() — old servers are discarded.
@@ -266,18 +290,7 @@ export class ServerManager {
     this.settings = config.settings;
     this.servers.clear();
     for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-      this.servers.set(name, {
-        name,
-        config: serverConfig,
-        state: "stopped",
-        client: null,
-        childPid: null,
-        retryCount: 0,
-        lastError: null,
-        stderrLog: [],
-        healthCheckTimer: null,
-        retryTimer: null,
-      });
+      this.setServer(name, serverConfig);
     }
   }
 
