@@ -12,14 +12,11 @@
   },
   "mcpServers": {
     // ── HTTP-based servers (streamable-http) ───────────────────────────────
-    // Use "transport": "streamable-http" for:
+    // Use "transport": "streamable-http" (or omit "transport" when "url" is set;
+    // "transport": "http" and "type": "http" are also accepted) for:
     // - Supabase (https://mcp.supabase.com)
     // - DeepSource (https://mcp.deepsource.com)
     // - Z.ai / other modern MCP HTTP servers
-    //
-    // COMMON PITFALLS TO AVOID:
-    // - Don't use "type": "http" — use "transport": "streamable-http"
-    // - Don't omit "transport" — default is "stdio" which requires "command"
 
     "supabase": {
       "transport": "streamable-http",
