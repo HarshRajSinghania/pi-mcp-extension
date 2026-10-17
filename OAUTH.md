@@ -55,6 +55,8 @@ You can provide pre-registered client credentials:
 }
 ```
 
+For Pi 1.x compatibility, an `oauth` object (`{ clientId, clientSecret, scope, redirectUrl | callbackUrl | callbackPort }`) is also accepted as an alias for `auth` (`callbackPort` maps to `http://127.0.0.1:<port>/callback`).
+
 ### Authenticate a Server
 
 Use `mcp_connect` with the server name, `/mcp:start deepsource`, or `/mcp:auth deepsource` in an interactive Pi session. Stored credentials are reused. If the server requires browser authorization, the flow will:
