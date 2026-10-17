@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.7] - 2026-10-17
+
 ### Fixed
 - Detach the retry-backoff `abort` listener from the connection `AbortSignal` when the backoff timer fires normally so retries do not accumulate stale listeners (#67).
 
