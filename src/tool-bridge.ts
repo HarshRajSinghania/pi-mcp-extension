@@ -16,7 +16,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as Type from "typebox";
 import type { TSchema } from "typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { McpError } from "./errors.js";
 import type { Settings } from "./config.js";
 
@@ -313,7 +313,7 @@ export async function listAllTools(
  * Tools are registered once and activated/deactivated as servers connect/disconnect.
  */
 export class ToolBridge {
-  private readonly settings: Settings;
+  private settings: Settings;
   private readonly pi: PiExtensionAPI;
   /** Tracks which Pi tool names belong to which MCP server. */
   private readonly serverToolNames = new Map<string, Set<string>>();
@@ -321,6 +321,11 @@ export class ToolBridge {
   constructor(settings: Settings, pi: PiExtensionAPI) {
     this.settings = settings;
     this.pi = pi;
+  }
+
+  /** Update bridge settings when session config is reloaded on session_start. */
+  updateSettings(settings: Settings): void {
+    this.settings = settings;
   }
 
   /**
