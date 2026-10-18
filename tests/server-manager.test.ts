@@ -6,11 +6,14 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ServerManager } from "../src/server-manager.js";
-import { ToolBridge } from "../src/tool-bridge.js";
+import { ToolBridge, type PiExtensionAPI } from "../src/tool-bridge.js";
 import type { McpConfig } from "../src/config.js";
 import { McpError } from "../src/errors.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import type { Socket } from "node:net";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { createMockExtension, createMockContext } from "./helpers/mock-extension.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_SERVER_PATH = join(__dirname, "mock-server.ts");
@@ -37,16 +40,60 @@ function makeMockConfig(overrides?: Partial<McpConfig>): McpConfig {
   };
 }
 
-function makeMockPi() {
-  const tools: any[] = [];
+interface MockToolResult {
+  content: [
+    { type: string; text: string; [key: string]: unknown },
+    ...Array<{ type: string; text: string; [key: string]: unknown }>,
+  ];
+  isError?: boolean;
+  [key: string]: unknown;
+}
+
+interface MockRegisteredTool {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+  execute: (
+    id: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    update?: unknown,
+    ctx?: unknown,
+  ) => Promise<MockToolResult>;
+  [key: string]: unknown;
+}
+
+function makeMockPi(): PiExtensionAPI & {
+  tools: MockRegisteredTool[];
+  getAllTools: () => Array<{
+    name: string;
+    description: string | undefined;
+    parameters: unknown;
+    sourceInfo: { path: string; line: number; source: string; scope: string; origin: string };
+  }>;
+  active: string[];
+} {
+  const tools: MockRegisteredTool[] = [];
   let active: string[] = [];
   return {
-    registerTool: (t: any) => tools.push(t),
-    getAllTools: () => tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0, source: "extension", scope: "tool", origin: "test" } })),
+    registerTool: (t) => {
+      tools.push(t as unknown as MockRegisteredTool);
+    },
+    getAllTools: () =>
+      tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+        sourceInfo: { path: "test", line: 0, source: "extension", scope: "tool", origin: "test" },
+      })),
     getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
+    setActiveTools: (names: string[]) => {
+      active = names;
+    },
     tools,
-    get active() { return active; },
+    get active() {
+      return active;
+    },
   };
 }
 
@@ -225,10 +272,14 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
       assert.equal(capturedCallbackOptions?.requestTimeoutMs, 1234);
       assert.ok(capturedCallbackOptions?.signal instanceof AbortSignal);
 
-      const client = manager.getServer("test")!.client! as any;
+      const client = manager.getServer("test")!.client!;
       let callToolTimeout: number | undefined;
       const origRequest = client.request.bind(client);
-      client.request = async (req: any, schema: any, options?: any) => {
+      client.request = async (
+        req: Parameters<typeof origRequest>[0],
+        schema: Parameters<typeof origRequest>[1],
+        options?: Parameters<typeof origRequest>[2],
+      ) => {
         if (req.method === "tools/call") {
           callToolTimeout = options?.timeout;
         }
@@ -246,7 +297,7 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
 
   it("should bound SSE transport.start() with per-server requestTimeoutMs and unblock close() when endpoint event never arrives (Issues 19.2, 20.1)", async () => {
     const { createServer } = await import("node:http");
-    const sockets = new Set<any>();
+    const sockets = new Set<Socket>();
     const server = createServer((_req, res) => {
       // Accept SSE stream and send headers, but NEVER send `event: endpoint`
       res.writeHead(200, {
@@ -314,14 +365,14 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
     const manager = new ServerManager(config);
     try {
       await manager.startServer("test", process.cwd());
-      const client = manager.getServer("test")!.client! as any;
+      const client = manager.getServer("test")!.client!;
       let pingCalls = 0;
       let inFlight = 0;
       let maxInFlight = 0;
-      let capturedOptions: any;
+      let capturedOptions: Parameters<Client["ping"]>[0];
       let resolvePing!: () => void;
 
-      client.ping = (opts?: any) => {
+      client.ping = (opts?: Parameters<Client["ping"]>[0]) => {
         pingCalls++;
         inFlight++;
         maxInFlight = Math.max(maxInFlight, inFlight);
@@ -469,7 +520,7 @@ setInterval(() => {}, 1000);
       // Process must already be dead by the time startServer rejects
       assert.throws(
         () => process.kill(childPid, 0),
-        (err: any) => err.code === "ESRCH",
+        (err: unknown) => (err as NodeJS.ErrnoException).code === "ESRCH",
         `Expected child PID ${childPid} to be terminated before startServer finished`,
       );
     } finally {
@@ -479,7 +530,7 @@ setInterval(() => {}, 1000);
   });
 
   it("should buffer split multi-byte UTF-8 stderr chunks with StringDecoder and strip terminal control sequences (Issue 21.4)", async () => {
-    const serverManagerMod = await import("../src/server-manager.js") as any;
+    const serverManagerMod = await import("../src/server-manager.js");
     assert.equal(typeof serverManagerMod.sanitizeStderrLine, "function");
 
     const dirty = "hello\x1b[31m red\x1b[0m\x1b]0;evil-title\x07\x1b]52;c;YWJj\x1b\\\x1bP1$r\x1b\\\x1bM\x07\x08 world 🚀\r";
@@ -617,26 +668,17 @@ await server.connect(new StdioServerTransport());
       }),
     );
 
-    const tools = new Map<string, any>();
-    const events = new Map<string, any>();
-    let active: string[] = [];
-    const pi = {
-      registerTool: (t: any) => tools.set(t.name, t),
-      registerCommand: () => {},
-      on: (n: string, h: any) => events.set(n, h),
-      getActiveTools: () => active,
-      setActiveTools: (names: string[]) => {
-        active = names;
-      },
-    };
-    const makeCtx = (cwd: string): any => ({
-      cwd,
-      hasUI: false,
-      ui: { notify: () => {} },
-    });
+    const mockExt = createMockExtension();
+    const tools = mockExt.tools;
+    const events = mockExt.events;
+    const makeCtx = (cwd: string) =>
+      createMockContext({
+        cwd,
+        hasUI: false,
+      });
 
     try {
-      await extension(pi as any, { bootstrapCwd: cwd1, globalConfigPath });
+      await extension(mockExt.api, { bootstrapCwd: cwd1, globalConfigPath });
       const ctx1 = makeCtx(cwd1);
       await events.get("session_start")({}, ctx1);
 
@@ -681,7 +723,7 @@ await server.connect(new StdioServerTransport());
         await manager.startServer("directProbe", cwd1);
         await manager.startServer("directProbe", cwd3);
         await new Promise((r) => setTimeout(r, 25));
-        const directTool = mockPi.tools.find((t) => t.name.includes("get_roots"));
+        const directTool = mockPi.tools.find((t) => t.name.includes("get_roots"))!;
         const res3 = JSON.parse((await directTool.execute("3", {}, undefined, () => {}, {})).content[0].text);
         assert.deepEqual(res3.roots, [{ uri: pathToFileURL(cwd3).href, name: "workspace-gamma" }]);
         assert.equal(res3.notifications, 1);
@@ -719,7 +761,14 @@ await server.connect(new StdioServerTransport());
     let capturedSignal: AbortSignal | undefined;
 
     t.mock.method(
-      manager as any,
+      manager as unknown as {
+        _connectWithTimeoutAndSignal: (
+          _client: unknown,
+          _transport: unknown,
+          _timeoutMs: number,
+          signal: AbortSignal,
+        ) => Promise<never>;
+      },
       "_connectWithTimeoutAndSignal",
       async (_client: unknown, _transport: unknown, _timeoutMs: number, signal: AbortSignal) => {
         capturedSignal = signal;

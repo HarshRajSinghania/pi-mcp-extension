@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extension from "../src/index.js";
 import { McpOAuthProvider, getAuthStatus } from "../src/oauth-provider.js";
+import { createMockExtension, createMockContext } from "./helpers/mock-extension.js";
 
 it("coordinates OAuth commands for a server name with spaces, including repeated reset and stop", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-auth-command-"));
@@ -27,18 +28,20 @@ it("coordinates OAuth commands for a server name with spaces, including repeated
   const address = listener.address();
   assert.ok(address && typeof address === "object");
   base = `http://127.0.0.1:${address.port}`;
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
+  const mockExt = createMockExtension();
+  const commands = mockExt.commands;
+  const events = mockExt.events;
   const messages: string[] = [];
   let opens = 0;
   let choices = 0;
-  const ctx: any = {
-    cwd: dir, hasUI: true,
+  const ctx = createMockContext({
+    cwd: dir,
+    hasUI: true,
     ui: {
       notify: (message: string) => messages.push(message),
       select: async (_title: string, options: string[]) => options.at(choices++ === 0 ? 0 : -1),
     },
-  };
+  });
   const waitForOpen = async (expected: number) => {
     for (let i = 0; i < 100 && opens < expected; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(opens, expected);
@@ -55,12 +58,7 @@ it("coordinates OAuth commands for a server name with spaces, including repeated
         "team server": { lifecycle: "lazy", transport: "streamable-http", url: `${base}/mcp`, auth: { type: "oauth", clientId: "test-client", redirectUrl: `http://127.0.0.1:${callbackAddress.port}/callback` } },
       },
     }));
-    await extension({
-      registerTool: () => {},
-      registerCommand: (name: string, command: any) => commands.set(name, command),
-      on: (name: string, handler: any) => events.set(name, handler),
-      getActiveTools: () => [], setActiveTools: () => {},
-    } as any, { bootstrapCwd: dir, globalConfigPath: join(dir, "missing.json"), authStorageDir: join(dir, "auth"), browserOpen: () => { opens++; } });
+    await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "missing.json"), authStorageDir: join(dir, "auth"), browserOpen: () => { opens++; } });
     await events.get("session_start")({}, ctx);
     await commands.get("mcp:auth").handler("  team server  ", ctx);
     assert.equal(opens, 2, "One initial browser launch and one explicit Retry");
@@ -100,11 +98,11 @@ it("stops a ready server on /mcp:auth and re-authenticates interactively instead
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-auth-ready-"));
   const authDir = join(dir, "auth");
   const fakeServer = await startFakeOAuthServer({ serverName: "ready-oauth", toolName: "ready_echo" });
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
+  const mockExt = createMockExtension();
+  const commands = mockExt.commands;
+  const events = mockExt.events;
   const messages: string[] = [];
-  let activeTools: string[] = [];
-  const ctx: any = {
+  const ctx = createMockContext({
     cwd: dir,
     hasUI: true,
     ui: {
@@ -114,7 +112,7 @@ it("stops a ready server on /mcp:auth and re-authenticates interactively instead
           opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
         }),
     },
-  };
+  });
 
   try {
     await mkdir(join(dir, ".pi"));
@@ -134,13 +132,7 @@ it("stops a ready server on /mcp:auth and re-authenticates interactively instead
     );
 
     await extension(
-      {
-        registerTool: () => {},
-        registerCommand: (name: string, command: any) => commands.set(name, command),
-        on: (name: string, handler: any) => events.set(name, handler),
-        getActiveTools: () => activeTools,
-        setActiveTools: (names: string[]) => { activeTools = names; },
-      } as any,
+      mockExt.api,
       {
         bootstrapCwd: dir,
         globalConfigPath: join(dir, "missing.json"),
@@ -158,6 +150,7 @@ it("stops a ready server on /mcp:auth and re-authenticates interactively instead
     fakeServer.expireAccessTokens();
     fakeServer.failRefresh = true;
     await commands.get("mcp:auth").handler("ready-oauth", ctx);
+    const activeTools = mockExt.activeTools;
 
     // Assert: /mcp:auth stopped the ready server, detected the 401/failed refresh, and opened the browser a second time
     assert.equal(fakeServer.browserOpenCount, 2);
@@ -201,10 +194,11 @@ it("should report usage on bare /mcp:auth --reset, support leading /mcp:auth --r
   const slowAddr = slowListener.address();
   assert.ok(slowAddr && typeof slowAddr === "object");
 
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
+  const mockExt = createMockExtension();
+  const commands = mockExt.commands;
+  const events = mockExt.events;
   const notifications: Array<{ msg: string; level?: string | undefined }> = [];
-  const ctx: any = {
+  const ctx = createMockContext({
     cwd: dir,
     hasUI: true,
     ui: {
@@ -214,7 +208,7 @@ it("should report usage on bare /mcp:auth --reset, support leading /mcp:auth --r
           opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
         }),
     },
-  };
+  });
 
   try {
     await mkdir(join(dir, ".pi"));
@@ -239,13 +233,7 @@ it("should report usage on bare /mcp:auth --reset, support leading /mcp:auth --r
     );
 
     await extension(
-      {
-        registerTool: () => {},
-        registerCommand: (name: string, command: any) => commands.set(name, command),
-        on: (name: string, handler: any) => events.set(name, handler),
-        getActiveTools: () => [],
-        setActiveTools: () => {},
-      } as any,
+      mockExt.api,
       {
         bootstrapCwd: dir,
         globalConfigPath: join(dir, "missing.json"),

@@ -5,6 +5,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
 import {
   convertJsonSchemaToTypebox,
   buildToolName,
@@ -13,11 +16,87 @@ import {
   listAllTools,
 } from "../src/tool-bridge.js";
 
+type SchemaTuple = [SchemaJson, SchemaJson, SchemaJson, SchemaJson, ...SchemaJson[]];
+type SchemaProps = Record<
+  | "name"
+  | "age"
+  | "address"
+  | "city"
+  | "zip"
+  | "str"
+  | "num"
+  | "int"
+  | "bool"
+  | "anyOfStr"
+  | "oneOfInt"
+  | "filter"
+  | "mode"
+  | "id"
+  | "email"
+  | "actor"
+  | "host"
+  | "next"
+  | "value"
+  | "start"
+  | "b"
+  | "count"
+  | "self"
+  | "left"
+  | "right"
+  | "mirrorId"
+  | "containerChild"
+  | "escapedRef"
+  | "protoRef",
+  SchemaJson
+> &
+  Record<string, SchemaJson>;
+
+interface SchemaJson extends TSchema {
+  type?: string;
+  description?: string;
+  title?: string;
+  default?: unknown;
+  format?: string;
+  pattern?: string;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  multipleOf?: number;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  minProperties?: number;
+  maxProperties?: number;
+  const?: unknown;
+  required?: string[];
+  properties: SchemaProps;
+  patternProperties?: Record<string, SchemaJson>;
+  additionalProperties: SchemaJson;
+  items: SchemaJson & SchemaTuple;
+  anyOf: SchemaTuple;
+  oneOf: SchemaTuple;
+  allOf: SchemaTuple;
+}
+
+type TestToolDefinition = Omit<ToolDefinition, "description" | "execute"> & {
+  description: string;
+  execute: (
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: unknown,
+    ctx?: unknown,
+  ) => ReturnType<ToolDefinition["execute"]>;
+};
+
 // ── Schema Conversion ─────────────────────────────────────────────────────────
 
 describe("convertJsonSchemaToTypebox", () => {
   it("converts string type", () => {
-    const schema = convertJsonSchemaToTypebox({ type: "string" }) as any;
+    const schema = convertJsonSchemaToTypebox({ type: "string" }) as SchemaJson;
     assert.equal(schema.type, "string");
   });
 
@@ -25,7 +104,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const schema = convertJsonSchemaToTypebox({
       type: "string",
       description: "A name",
-    }) as any;
+    }) as SchemaJson;
     assert.equal(schema.description, "A name");
   });
 
@@ -33,7 +112,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const schema = convertJsonSchemaToTypebox({
       type: "string",
       enum: ["json", "text", "yaml"],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.anyOf, "Should be a Union (anyOf)");
     assert.equal(schema.anyOf.length, 3);
     assert.equal(schema.anyOf[0].const, "json");
@@ -42,17 +121,17 @@ describe("convertJsonSchemaToTypebox", () => {
   });
 
   it("converts number type", () => {
-    const schema = convertJsonSchemaToTypebox({ type: "number" }) as any;
+    const schema = convertJsonSchemaToTypebox({ type: "number" }) as SchemaJson;
     assert.equal(schema.type, "number");
   });
 
   it("converts integer as Integer", () => {
-    const schema = convertJsonSchemaToTypebox({ type: "integer" }) as any;
+    const schema = convertJsonSchemaToTypebox({ type: "integer" }) as SchemaJson;
     assert.equal(schema.type, "integer");
   });
 
   it("converts boolean type", () => {
-    const schema = convertJsonSchemaToTypebox({ type: "boolean" }) as any;
+    const schema = convertJsonSchemaToTypebox({ type: "boolean" }) as SchemaJson;
     assert.equal(schema.type, "boolean");
   });
 
@@ -60,7 +139,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const schema = convertJsonSchemaToTypebox({
       type: "array",
       items: { type: "string" },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(schema.type, "array");
   });
 
@@ -72,7 +151,7 @@ describe("convertJsonSchemaToTypebox", () => {
         age: { type: "number" },
       },
       required: ["name"],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.properties, "Should have properties");
     // TypeBox (Pi's version) expresses optionality via the `required` array,
     // not via Symbol modifiers. 'name' is required, 'age' is optional.
@@ -91,14 +170,14 @@ describe("convertJsonSchemaToTypebox", () => {
         },
       },
       required: ["address"],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.properties, "Should have properties");
     const inner = schema.properties.address;
     assert.ok(inner.properties, "Nested object should have properties");
   });
 
   it("falls back to Any for unknown type", () => {
-    const schema = convertJsonSchemaToTypebox({ type: "unknown-type" }) as any;
+    const schema = convertJsonSchemaToTypebox({ type: "unknown-type" }) as SchemaJson;
     // Any schema has no specific type field — check it doesn't throw and returns object
     assert.ok(typeof schema === "object");
   });
@@ -106,7 +185,7 @@ describe("convertJsonSchemaToTypebox", () => {
   it("converts oneOf to Union", () => {
     const schema = convertJsonSchemaToTypebox({
       oneOf: [{ type: "string" }, { type: "number" }],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.anyOf, "oneOf should produce a Union (anyOf)");
     assert.equal(schema.anyOf.length, 2);
     assert.equal(schema.anyOf[0].type, "string");
@@ -116,7 +195,7 @@ describe("convertJsonSchemaToTypebox", () => {
   it("converts anyOf to Union with Null ordered first", () => {
     const schema = convertJsonSchemaToTypebox({
       anyOf: [{ type: "boolean" }, { type: "null" }],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.anyOf, "anyOf should produce a Union");
     assert.equal(schema.anyOf.length, 2);
     assert.equal(schema.anyOf[0].type, "null");
@@ -129,7 +208,7 @@ describe("convertJsonSchemaToTypebox", () => {
         { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
         { type: "object", properties: { age: { type: "number" } }, required: ["age"] },
       ],
-    }) as any;
+    }) as SchemaJson;
     assert.ok(schema.allOf, "allOf should produce an Intersect (allOf)");
     assert.equal(schema.allOf.length, 2);
   });
@@ -138,7 +217,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const schema = convertJsonSchemaToTypebox({
       $ref: "#/$defs/MyString",
       $defs: { MyString: { type: "string" } },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(schema.type, "string", "$ref should resolve to the referenced type");
   });
 
@@ -146,7 +225,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const schema = convertJsonSchemaToTypebox({
       $ref: "#/definitions/Foo",
       definitions: { Foo: { type: "boolean" } },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(schema.type, "boolean");
   });
 
@@ -155,18 +234,18 @@ describe("convertJsonSchemaToTypebox", () => {
       $ref: "#/$defs/Inner",
       description: "A description from the ref",
       $defs: { Inner: { type: "string" } },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(schema.type, "string");
     assert.equal(schema.description, "A description from the ref");
   });
 
   it("falls back to Any for unresolvable $ref", () => {
-    const schema = convertJsonSchemaToTypebox({ $ref: "#/definitions/NonExistent" }) as any;
+    const schema = convertJsonSchemaToTypebox({ $ref: "#/definitions/NonExistent" }) as SchemaJson;
     assert.ok(typeof schema === "object");
   });
 
   it("falls back to Any for external $ref", () => {
-    const schema = convertJsonSchemaToTypebox({ $ref: "external-schema.json#/Foo" }) as any;
+    const schema = convertJsonSchemaToTypebox({ $ref: "external-schema.json#/Foo" }) as SchemaJson;
     assert.ok(typeof schema === "object");
   });
 
@@ -191,7 +270,7 @@ describe("convertJsonSchemaToTypebox", () => {
           properties: { tag: { type: "string" } },
         },
       },
-    }) as any;
+    }) as SchemaJson;
 
     assert.equal(schema.properties.str.anyOf[0].type, "null");
     assert.equal(schema.properties.str.anyOf[1].type, "string");
@@ -232,7 +311,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const twoTypes = convertJsonSchemaToTypebox({
       type: ["string", "number"],
       description: "String or number ID",
-    }) as any;
+    }) as SchemaJson;
     assert.ok(Array.isArray(twoTypes.anyOf));
     assert.equal(twoTypes.anyOf.length, 2);
     assert.equal(twoTypes.anyOf[0].type, "string");
@@ -241,7 +320,7 @@ describe("convertJsonSchemaToTypebox", () => {
 
     const withNull = convertJsonSchemaToTypebox({
       type: ["string", "number", "null"],
-    }) as any;
+    }) as SchemaJson;
     assert.equal(withNull.anyOf.length, 3);
     assert.equal(withNull.anyOf[0].type, "null");
     assert.equal(withNull.anyOf[1].type, "string");
@@ -250,18 +329,18 @@ describe("convertJsonSchemaToTypebox", () => {
     const onlyNull = convertJsonSchemaToTypebox({
       type: ["null"],
       description: "Null only",
-    }) as any;
+    }) as SchemaJson;
     assert.equal(onlyNull.type, "null");
     assert.equal(onlyNull.description, "Null only");
   });
 
   it("handles null input gracefully", () => {
-    const schema = convertJsonSchemaToTypebox(null as unknown as Record<string, unknown>) as any;
+    const schema = convertJsonSchemaToTypebox(null as unknown as Record<string, unknown>) as SchemaJson;
     assert.ok(typeof schema === "object");
   });
 
   it("handles empty object schema (no properties)", () => {
-    const result = convertJsonSchemaToTypebox({ type: "object" }) as any;
+    const result = convertJsonSchemaToTypebox({ type: "object" }) as SchemaJson;
     assert.equal(result.type, "object");
     assert.deepEqual(result.properties, {});
     assert.equal(result.patternProperties, undefined);
@@ -275,7 +354,7 @@ describe("convertJsonSchemaToTypebox", () => {
         email: { type: "string" },
       },
       anyOf: [{ required: ["id"] }, { required: ["email"] }],
-    }) as any;
+    }) as SchemaJson;
     assert.equal(objWithAnyOf.type, "object");
     assert.equal(objWithAnyOf.properties.id.type, "string");
     assert.equal(objWithAnyOf.properties.email.type, "string");
@@ -290,7 +369,7 @@ describe("convertJsonSchemaToTypebox", () => {
         email: { type: "string" },
       },
       oneOf: [{ required: ["id"] }, { required: ["email"] }],
-    }) as any;
+    }) as SchemaJson;
     assert.equal(objWithOneOf.type, "object");
     assert.equal(objWithOneOf.properties.id.type, "string");
     assert.equal(objWithOneOf.properties.email.type, "string");
@@ -316,7 +395,7 @@ describe("convertJsonSchemaToTypebox", () => {
           required: ["actor"],
         },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(objWithAllOf.type, "object");
     assert.equal(objWithAllOf.properties.id.type, "string");
     assert.equal(objWithAllOf.properties.email.type, "string");
@@ -330,7 +409,7 @@ describe("convertJsonSchemaToTypebox", () => {
       additionalProperties: { type: "integer" },
       minProperties: 1,
       maxProperties: 5,
-    }) as any;
+    }) as SchemaJson;
     assert.equal(implicitObj.type, "object");
     assert.equal(implicitObj.properties.host.type, "string");
     assert.deepEqual(implicitObj.required, ["host"]);
@@ -340,13 +419,13 @@ describe("convertJsonSchemaToTypebox", () => {
 
     const implicitArray = convertJsonSchemaToTypebox({
       items: { type: "boolean" },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(implicitArray.type, "array");
     assert.equal(implicitArray.items.type, "boolean");
   });
 
   it("prevents infinite recursion on deeply nested schemas and cyclic $ref while resolving shared DAG $refs and RFC 6901 pointers", () => {
-    let deepSchema: any = { type: "string" };
+    let deepSchema: Record<string, unknown> = { type: "string" };
     for (let i = 0; i < 15; i++) {
       deepSchema = { type: "object", properties: { nested: deepSchema }, required: [] };
     }
@@ -368,7 +447,7 @@ describe("convertJsonSchemaToTypebox", () => {
           },
         },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(cyclic.type, "object");
     assert.equal(cyclic.properties.next.type, "object");
     assert.equal(cyclic.properties.next.properties.value.type, "string");
@@ -395,7 +474,7 @@ describe("convertJsonSchemaToTypebox", () => {
           },
         },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(mutualCyclic.properties.start.type, "object");
     assert.equal(mutualCyclic.properties.start.properties.b.type, "object");
     assert.equal(mutualCyclic.properties.start.properties.b.properties.count.type, "integer");
@@ -406,7 +485,7 @@ describe("convertJsonSchemaToTypebox", () => {
       properties: {
         self: { $ref: "#" },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(rootCyclic.type, "object");
     assert.equal(rootCyclic.properties.self.type, "object");
 
@@ -420,7 +499,7 @@ describe("convertJsonSchemaToTypebox", () => {
       $defs: {
         Leaf: { type: "integer" },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(dag.properties.left.type, "integer");
     assert.equal(dag.properties.right.type, "integer");
 
@@ -448,7 +527,7 @@ describe("convertJsonSchemaToTypebox", () => {
         },
         "a/b~c": { type: "boolean" },
       },
-    }) as any;
+    }) as SchemaJson;
     assert.equal(multiSegment.properties.mirrorId.type, "integer");
     assert.equal(multiSegment.properties.containerChild.type, "string");
     assert.equal(multiSegment.properties.escapedRef.type, "boolean");
@@ -456,17 +535,17 @@ describe("convertJsonSchemaToTypebox", () => {
   });
 
   it("supports const, untyped/numeric/nullable enum, tuple items/prefixItems, and validation constraints", () => {
-    const constStr = convertJsonSchemaToTypebox({ const: "fixed", description: "Fixed literal" }) as any;
+    const constStr = convertJsonSchemaToTypebox({ const: "fixed", description: "Fixed literal" }) as SchemaJson;
     assert.equal(constStr.const, "fixed");
     assert.equal(constStr.description, "Fixed literal");
 
-    const constNull = convertJsonSchemaToTypebox({ const: null }) as any;
+    const constNull = convertJsonSchemaToTypebox({ const: null }) as SchemaJson;
     assert.equal(constNull.type, "null");
 
     const untypedEnum = convertJsonSchemaToTypebox({
       enum: ["alpha", 2, true, null],
       description: "Mixed nullable enum",
-    }) as any;
+    }) as SchemaJson;
     assert.equal(untypedEnum.description, "Mixed nullable enum");
     assert.equal(untypedEnum.anyOf.length, 4);
     assert.equal(untypedEnum.anyOf[0].type, "null");
@@ -477,7 +556,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const tuplePrefix = convertJsonSchemaToTypebox({
       type: "array",
       prefixItems: [{ type: "string" }, { type: "integer" }],
-    }) as any;
+    }) as SchemaJson;
     assert.equal(tuplePrefix.type, "array");
     assert.equal(Array.isArray(tuplePrefix.items), true);
     assert.equal(tuplePrefix.items[0].type, "string");
@@ -486,7 +565,7 @@ describe("convertJsonSchemaToTypebox", () => {
     const tupleItems = convertJsonSchemaToTypebox({
       type: "array",
       items: [{ type: "boolean" }, { type: "number" }],
-    }) as any;
+    }) as SchemaJson;
     assert.equal(tupleItems.type, "array");
     assert.equal(Array.isArray(tupleItems.items), true);
     assert.equal(tupleItems.items[0].type, "boolean");
@@ -500,7 +579,7 @@ describe("convertJsonSchemaToTypebox", () => {
       pattern: "^[a-z]+$",
       minLength: 2,
       maxLength: 16,
-    }) as any;
+    }) as SchemaJson;
     assert.equal(constrainedString.title, "Username");
     assert.equal(constrainedString.default, "anon");
     assert.equal(constrainedString.format, "slug");
@@ -515,7 +594,7 @@ describe("convertJsonSchemaToTypebox", () => {
       exclusiveMinimum: 0,
       exclusiveMaximum: 101,
       multipleOf: 5,
-    }) as any;
+    }) as SchemaJson;
     assert.equal(constrainedNum.minimum, 1);
     assert.equal(constrainedNum.maximum, 100);
     assert.equal(constrainedNum.exclusiveMinimum, 0);
@@ -528,7 +607,7 @@ describe("convertJsonSchemaToTypebox", () => {
       minItems: 1,
       maxItems: 10,
       uniqueItems: true,
-    }) as any;
+    }) as SchemaJson;
     assert.equal(constrainedArr.minItems, 1);
     assert.equal(constrainedArr.maxItems, 10);
     assert.equal(constrainedArr.uniqueItems, true);
@@ -582,12 +661,12 @@ describe("buildToolName", () => {
 
 describe("ToolBridge", () => {
   it("registers tools and activates them", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = [];
 
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
-      getAllTools: () => registeredTools.map((t: any) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
+      getAllTools: () => registeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
@@ -616,7 +695,7 @@ describe("ToolBridge", () => {
         ],
         // No nextCursor — single page
       }),
-    } as any;
+    } as unknown as Client;
 
     const settings = {
       toolPrefix: "mcp",
@@ -642,12 +721,12 @@ describe("ToolBridge", () => {
   });
 
   it("deactivates server tools on disconnect", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = ["mcp_myserver_echo", "mcp_myserver_count", "other_tool"];
 
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
-      getAllTools: () => registeredTools.map((t: any) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
+      getAllTools: () => registeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
@@ -657,7 +736,7 @@ describe("ToolBridge", () => {
 
     // Simulate already-registered tools
     const serverTools = new Set(["mcp_myserver_echo", "mcp_myserver_count"]);
-    (bridge as any).serverToolNames.set("myserver", serverTools);
+    (bridge as unknown as { serverToolNames: Map<string, Set<string>> }).serverToolNames.set("myserver", serverTools);
 
     bridge.deactivateServer("myserver");
 
@@ -669,12 +748,12 @@ describe("ToolBridge", () => {
   });
 
   it("re-registers tools on repeated refresh to capture new client", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = [];
 
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
-      getAllTools: () => registeredTools.map((t: any) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
+      getAllTools: () => registeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
@@ -687,7 +766,7 @@ describe("ToolBridge", () => {
           inputSchema: { type: "object", properties: {}, required: [] },
         }],
       }),
-    } as any;
+    } as unknown as Client;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
     const bridge = new ToolBridge(settings, mockPi);
@@ -705,11 +784,11 @@ describe("ToolBridge", () => {
   });
 
   it("includes annotation hints in tool description", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let annotationActiveTools: string[] = [];
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
-      getAllTools: () => registeredTools.map((t: any) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
+      getAllTools: () => registeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
       getActiveTools: () => annotationActiveTools,
       setActiveTools: (names: string[]) => { annotationActiveTools = names; },
     };
@@ -722,26 +801,26 @@ describe("ToolBridge", () => {
           annotations: { destructiveHint: true, idempotentHint: false, readOnlyHint: false },
         }],
       }),
-    } as any;
+    } as unknown as Client;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
     const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
-    const tool = registeredTools[0];
+    const tool = registeredTools[0]!;
     assert.ok(tool.description.includes("⚠️ destructive"));
   });
 
   it("passes through MCP image content and filters non-text blocks on isError", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = [];
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
 
-    let callResponse: any = {
+    let callResponse: Record<string, unknown> = {
       content: [
         { type: "text", text: "Screenshot captured" },
         { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
@@ -750,7 +829,7 @@ describe("ToolBridge", () => {
     };
 
     const mockClient = {
-      request: async (req: any) => {
+      request: async (req: { method: string }) => {
         if (req.method === "tools/list") {
           return {
             tools: [{
@@ -762,13 +841,13 @@ describe("ToolBridge", () => {
         }
         return callResponse;
       },
-    } as any;
+    } as unknown as Client;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
     const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
-    const tool = registeredTools[0];
+    const tool = registeredTools[0]!;
     const okResult = await tool.execute("call-1", {}, undefined, undefined, undefined);
     assert.deepEqual(okResult.content, [
       { type: "text", text: "Screenshot captured" },
@@ -785,7 +864,7 @@ describe("ToolBridge", () => {
     };
     await assert.rejects(
       () => tool.execute("call-2", {}, undefined, undefined, undefined),
-      (err: any) => {
+      (err: { message?: string; code?: string }) => {
         assert.equal(err.message, "Render failed");
         assert.equal(err.code, "tool");
         return true;
@@ -801,7 +880,7 @@ describe("ToolBridge", () => {
     };
     await assert.rejects(
       () => tool.execute("call-3", {}, undefined, undefined, undefined),
-      (err: any) => {
+      (err: { message?: string; code?: string }) => {
         assert.equal(err.message, "Tool reported an error");
         assert.equal(err.code, "tool");
         return true;
@@ -810,10 +889,10 @@ describe("ToolBridge", () => {
   });
 
   it("disambiguates intra-server and cross-server tool name collisions and isolates server deactivation", async () => {
-    const registeredTools = new Map<string, any>();
+    const registeredTools = new Map<string, ToolDefinition>();
     let activeTools: string[] = [];
     const mockPi = {
-      registerTool: (t: any) => registeredTools.set(t.name, t),
+      registerTool: (t: unknown) => registeredTools.set((t as ToolDefinition).name, t as ToolDefinition),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
@@ -828,7 +907,7 @@ describe("ToolBridge", () => {
           { name: "my_tool", inputSchema: { type: "object" } },
         ],
       }),
-    } as any;
+    } as unknown as Client;
     await bridge.refreshTools("alpha", clientAlpha);
     assert.equal(activeTools.length, 2, "Both colliding intra-server tools must be active");
     assert.ok(activeTools.includes("mcp_alpha_my_tool"));
@@ -839,12 +918,12 @@ describe("ToolBridge", () => {
       request: async () => ({
         tools: [{ name: "c", inputSchema: { type: "object" } }],
       }),
-    } as any;
+    } as unknown as Client;
     const clientA = {
       request: async () => ({
         tools: [{ name: "b_c", inputSchema: { type: "object" } }],
       }),
-    } as any;
+    } as unknown as Client;
 
     await bridge.refreshTools("a_b", clientAB);
     await bridge.refreshTools("a", clientA);
@@ -866,28 +945,28 @@ describe("ToolBridge", () => {
   });
 
   it("discards stale out-of-order refreshTools responses via monotonic generation guard", async () => {
-    const registeredTools = new Map<string, any>();
+    const registeredTools = new Map<string, ToolDefinition>();
     let activeTools: string[] = [];
     const mockPi = {
-      registerTool: (t: any) => registeredTools.set(t.name, t),
+      registerTool: (t: unknown) => registeredTools.set((t as ToolDefinition).name, t as ToolDefinition),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
     const bridge = new ToolBridge(settings, mockPi);
 
-    let resolveSlow!: (val: any) => void;
+    let resolveSlow!: (val: unknown) => void;
     const slowClient = {
       request: () =>
         new Promise((resolve) => {
           resolveSlow = resolve;
         }),
-    } as any;
+    } as unknown as Client;
     const fastClient = {
       request: async () => ({
         tools: [{ name: "fresh_tool", inputSchema: { type: "object" } }],
       }),
-    } as any;
+    } as unknown as Client;
 
     const slowRefresh = bridge.refreshTools("srv", slowClient);
     const fastRefresh = bridge.refreshTools("srv", fastClient);
@@ -905,13 +984,13 @@ describe("ToolBridge", () => {
     assert.equal(registeredTools.has("mcp_srv_stale_tool"), false);
 
     // Also test in-flight refresh discarded when deactivateServer is called
-    let resolveBeforeDeactivate!: (val: any) => void;
+    let resolveBeforeDeactivate!: (val: unknown) => void;
     const clientBeforeDeactivate = {
       request: () =>
         new Promise((resolve) => {
           resolveBeforeDeactivate = resolve;
         }),
-    } as any;
+    } as unknown as Client;
     const pendingRefresh = bridge.refreshTools("srv", clientBeforeDeactivate);
     bridge.deactivateServer("srv");
     assert.deepEqual(activeTools, []);
@@ -923,17 +1002,17 @@ describe("ToolBridge", () => {
   });
 
   it("throws McpError on pre-aborted signal and falls back to structuredContent when content is empty", async () => {
-    const registeredTools: any[] = [];
+    const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = [];
     const mockPi = {
-      registerTool: (t: any) => registeredTools.push(t),
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
 
     let callCount = 0;
     const mockClient = {
-      request: async (req: any) => {
+      request: async (req: { method: string }) => {
         if (req.method === "tools/list") {
           return {
             tools: [{ name: "structured", inputSchema: { type: "object" } }],
@@ -945,19 +1024,19 @@ describe("ToolBridge", () => {
           structuredContent: { ok: true, count: 42 },
         };
       },
-    } as any;
+    } as unknown as Client;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
     const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
-    const tool = registeredTools[0];
+    const tool = registeredTools[0]!;
     const abortController = new AbortController();
     abortController.abort();
 
     await assert.rejects(
       () => tool.execute("call-aborted", {}, abortController.signal, undefined, undefined),
-      (err: any) => {
+      (err: { name?: string; message?: string; code?: string }) => {
         assert.equal(err.name, "McpError");
         assert.equal(err.message, "Tool execution cancelled");
         assert.equal(err.code, "protocol");
@@ -1018,11 +1097,11 @@ describe("listAllTools pagination", () => {
     let pageIndex = 0;
 
     const mockClient = {
-      request: async (_req: any) => {
+      request: async (_req: unknown) => {
         const page = pages[pageIndex++];
         return page;
       },
-    } as any;
+    } as unknown as Client;
 
     const tools = await listAllTools(mockClient, 30000);
     assert.equal(tools.length, 3);

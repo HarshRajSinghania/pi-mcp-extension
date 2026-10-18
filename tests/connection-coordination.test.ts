@@ -5,8 +5,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import type { Socket } from "node:net";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import {
+  asExtensionAPI,
+  createMockContext,
+  createStrictMap,
+  type MockEventHandler,
+  type MockTool,
+} from "./helpers/mock-extension.js";
 import { ServerManager } from "../src/server-manager.js";
-import { ToolBridge } from "../src/tool-bridge.js";
+import { ToolBridge, type PiExtensionAPI } from "../src/tool-bridge.js";
 import { AuthRequiredError, McpOAuthProvider, acquireAuthLock, getAuthStatus, resetAuth } from "../src/oauth-provider.js";
 import type { McpConfig } from "../src/config.js";
 
@@ -23,11 +33,29 @@ function gate() {
   return { promise, release };
 }
 
- describe("coordinated connections", () => {
+function makeBridgeApi(
+  onRegister: (t: ToolDefinition) => void,
+  getActive: () => string[],
+  setActive: (names: string[]) => void,
+): PiExtensionAPI {
+  return {
+    registerTool: (t) => {
+      onRegister(t as ToolDefinition);
+    },
+    getActiveTools: getActive,
+    setActiveTools: setActive,
+  };
+}
+
+describe("coordinated connections", () => {
   it("shares readiness including discovery and activates a lazy server only when requested", async () => {
-    const tools: any[] = [];
+    const tools: ToolDefinition[] = [];
     let active: string[] = [];
-    const pi = { registerTool: (tool: any) => tools.push(tool), getActiveTools: () => active, setActiveTools: (names: string[]) => { active = names; } };
+    const pi = makeBridgeApi(
+      (tool) => tools.push(tool),
+      () => active,
+      (names) => { active = names; },
+    );
     const manager = new ServerManager(config());
     const bridge = new ToolBridge(config().settings, pi);
     const discovery = gate();
@@ -295,7 +323,7 @@ it("should fail immediately with AuthRequiredError and transition connectRequest
     authDir,
   );
   const provider = new McpOAuthProvider("local", { clientId: "local-client", redirectUrl }, undefined, authDir);
-  const events = new Map<string, any>();
+  const events = createStrictMap<string, MockEventHandler>();
 
   try {
     await provider.saveTokens({
@@ -321,17 +349,17 @@ it("should fail immediately with AuthRequiredError and transition connectRequest
       token_type: "Bearer",
     });
 
-    const tools = new Map<string, any>();
+    const tools = createStrictMap<string, MockTool>();
     let activeTools: string[] = [];
     let browserOpened = 0;
-    const pi = {
-      registerTool: (tool: any) => tools.set(tool.name, tool),
+    const pi = asExtensionAPI({
+      registerTool: (tool) => tools.set(tool.name, tool),
       registerCommand: () => {},
-      on: (name: string, handler: any) => events.set(name, handler),
+      on: (name, handler) => events.set(name, handler),
       getActiveTools: () => activeTools,
       setActiveTools: (names: string[]) => { activeTools = names; },
-    };
-    const ctx: any = {
+    });
+    const ctx = createMockContext({
       cwd: dir,
       hasUI: true,
       ui: {
@@ -341,7 +369,7 @@ it("should fail immediately with AuthRequiredError and transition connectRequest
             opts?.signal?.addEventListener("abort", () => resolve(undefined));
           }),
       },
-    };
+    });
 
     await mkdir(join(dir, ".pi"));
     await writeFile(
@@ -359,7 +387,7 @@ it("should fail immediately with AuthRequiredError and transition connectRequest
       }),
     );
 
-    await extension(pi as any, {
+    await extension(pi, {
       bootstrapCwd: dir,
       globalConfigPath: join(dir, "no-global.json"),
       authStorageDir: authDir,
@@ -438,7 +466,7 @@ for (const externalAction of ["stop", "shutdown"] as const) {
     const closeFinished = gate();
     try {
       await manager.startServer("lazy", process.cwd());
-      const client = manager.getServer("lazy")!.client! as any;
+      const client = manager.getServer("lazy")!.client!;
       const originalClose = client.close.bind(client);
       client.ping = async () => { throw new Error("mock ping failed"); };
       client.close = async () => {
@@ -472,7 +500,7 @@ it("still reconnects after health failure when no external stop occurs", async (
   const recovered = gate();
   try {
     await manager.startServer("lazy", process.cwd());
-    const client = manager.getServer("lazy")!.client! as any;
+    const client = manager.getServer("lazy")!.client!;
     client.ping = async () => { throw new Error("mock ping failed"); };
     let recoveryStarts = 0;
     const originalStart = manager.startServer.bind(manager);
@@ -493,8 +521,8 @@ it("deactivates tools and reconnects when the server process dies unexpectedly",
   manager.setServerStoppedCallback(() => { stoppedCalls++; stopped.release(); });
   try {
     await manager.startServer("lazy", process.cwd());
-    const firstClient = manager.getServer("lazy")!.client! as any;
-    const firstPid = firstClient.transport.pid as number;
+    const firstClient = manager.getServer("lazy")!.client!;
+    const firstPid = (firstClient.transport as unknown as { pid?: number }).pid;
     assert.ok(firstPid);
     process.kill(firstPid, "SIGKILL");
     await stopped.promise;
@@ -524,7 +552,7 @@ it("does not reconnect after a deliberate stop", async () => {
 it("should clear server.attempt and server.controller on stopServer and unblock pending SSE start() so subsequent startServer does not reuse aborted attempt (Issues 19.2, 20.1)", async () => {
   const { createServer } = await import("node:http");
   let allowEndpoint = false;
-  const sockets = new Set<any>();
+  const sockets = new Set<Socket>();
 
   const listener = createServer((req, res) => {
     if (req.url === "/sse" && req.method === "GET") {
@@ -607,7 +635,7 @@ it("should cancel listAllTools and refreshTools with AuthCancelledError instead 
   const listToolsEntered = gate();
 
   const slowClient = {
-    listTools: (_params?: any, options?: { signal?: AbortSignal; timeout?: number }) =>
+    listTools: (_params?: unknown, options?: { signal?: AbortSignal; timeout?: number }) =>
       new Promise((_resolve, reject) => {
         listToolsEntered.release();
         options?.signal?.addEventListener("abort", () => {
@@ -616,7 +644,7 @@ it("should cancel listAllTools and refreshTools with AuthCancelledError instead 
           reject(abortErr);
         });
       }),
-  } as any;
+  } as unknown as Client;
 
   const refreshPromise = bridge.refreshTools("cancel-srv", slowClient, {
     requestTimeoutMs: 1234,
@@ -770,19 +798,19 @@ it("should recover SSE and StreamableHTTP servers on unexpected transport errors
     // 4. Verify src/index.ts wires setRecoveryFailedCallback to notify on auth vs connection errors
     shouldFailConnect = false;
     shouldRequireAuth = false;
-    const events = new Map<string, any>();
+    const events = createStrictMap<string, (event: unknown, ctx: unknown) => unknown>();
     const notifications: Array<{ msg: string; level?: string | undefined }> = [];
     const statuses: Array<string | undefined> = [];
     const authNotified = gate();
     const connNotified = gate();
-    const pi = {
+    const pi = asExtensionAPI({
       registerTool: () => {},
       registerCommand: () => {},
-      on: (name: string, fn: any) => events.set(name, fn),
+      on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => events.set(name, fn),
       getActiveTools: () => [],
       setActiveTools: () => {},
-    };
-    const ctx: any = {
+    });
+    const ctx = createMockContext({
       cwd: dir,
       hasUI: true,
       ui: {
@@ -794,7 +822,7 @@ it("should recover SSE and StreamableHTTP servers on unexpected transport errors
         setStatus: (_key: string, text?: string) => statuses.push(text),
         select: async () => "Not now",
       },
-    };
+    });
     await mkdir(join(dir, ".pi"), { recursive: true });
     await writeFile(
       join(dir, ".pi", "mcp.json"),
@@ -812,7 +840,7 @@ it("should recover SSE and StreamableHTTP servers on unexpected transport errors
       }),
     );
 
-    await extension(pi as any, {
+    await extension(pi, {
       bootstrapCwd: dir,
       globalConfigPath: join(dir, "no-global.json"),
       authStorageDir: join(dir, "auth2"),
@@ -851,9 +879,9 @@ it("should immediately wake aborted authQueue waiters, remove zombie connectAtte
   const srvB = await startFakeOAuthServer({ serverName: "srvB", toolName: "tool_b" });
   const srvC = await startFakeOAuthServer({ serverName: "srvC", toolName: "tool_c" });
 
-  const tools = new Map<string, any>();
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
+  const tools = createStrictMap<string, MockTool>();
+  const commands = createStrictMap<string, unknown>();
+  const events = createStrictMap<string, (event: unknown, ctx: unknown) => unknown>();
   let activeTools: string[] = [];
   const browserTimeline: string[] = [];
 
@@ -866,17 +894,17 @@ it("should immediately wake aborted authQueue waiters, remove zombie connectAtte
     markSrvABrowserOpen = resolve;
   });
 
-  const pi = {
-    registerTool: (t: any) => tools.set(t.name, t),
-    registerCommand: (n: string, c: any) => commands.set(n, c),
-    on: (n: string, h: any) => events.set(n, h),
+  const pi = asExtensionAPI({
+    registerTool: (t: MockTool) => tools.set(t.name, t),
+    registerCommand: (n: string, c: unknown) => commands.set(n, c),
+    on: (n: string, h: (event: unknown, ctx: unknown) => unknown) => events.set(n, h),
     getActiveTools: () => activeTools,
     setActiveTools: (names: string[]) => {
       activeTools = names;
     },
-  };
+  });
 
-  const ctx: any = {
+  const ctx = createMockContext({
     cwd: dir,
     hasUI: true,
     ui: {
@@ -886,7 +914,7 @@ it("should immediately wake aborted authQueue waiters, remove zombie connectAtte
           opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
         }),
     },
-  };
+  });
 
   try {
     await mkdir(join(dir, ".pi"), { recursive: true });
@@ -902,7 +930,7 @@ it("should immediately wake aborted authQueue waiters, remove zombie connectAtte
       }),
     );
 
-    await extension(pi as any, {
+    await extension(pi, {
       bootstrapCwd: dir,
       globalConfigPath: join(dir, "no-global.json"),
       authStorageDir: authDir,
@@ -956,7 +984,7 @@ it("should immediately wake aborted authQueue waiters, remove zombie connectAtte
     assert.deepEqual(browserTimeline, ["srvA", "srvC", "srvB"]);
   } finally {
     releaseSrvABrowser();
-    await events.get("session_shutdown")?.({}, ctx);
+    await events.get("session_shutdown")({}, ctx);
     await srvA.close();
     await srvB.close();
     await srvC.close();
@@ -978,9 +1006,9 @@ it("should perform full teardown on session_start config reload or config load f
   const authDir = join(baseDir, "auth");
   const fakeOAuth = await startFakeOAuthServer({ serverName: "oauth1", toolName: "oauth_tool" });
 
-  const tools = new Map<string, any>();
-  const commands = new Map<string, any>();
-  const events = new Map<string, any>();
+  const tools = createStrictMap<string, MockTool>();
+  const commands = createStrictMap<string, unknown>();
+  const events = createStrictMap<string, (event: unknown, ctx: unknown) => unknown>();
   let activeTools: string[] = [];
   const statuses: Array<string | undefined> = [];
   const notifications: Array<{ msg: string; level?: string | undefined }> = [];
@@ -990,34 +1018,35 @@ it("should perform full teardown on session_start config reload or config load f
     markBrowserWaiting = resolve;
   });
 
-  const pi = {
-    registerTool: (t: any) => tools.set(t.name, t),
-    registerCommand: (n: string, c: any) => commands.set(n, c),
-    on: (n: string, h: any) => events.set(n, h),
+  const pi = asExtensionAPI({
+    registerTool: (t: MockTool) => tools.set(t.name, t),
+    registerCommand: (n: string, c: unknown) => commands.set(n, c),
+    on: (n: string, h: (event: unknown, ctx: unknown) => unknown) => events.set(n, h),
     getActiveTools: () => activeTools,
     setActiveTools: (names: string[]) => {
       activeTools = names;
     },
-  };
-
-  const makeCtx = (cwd: string): any => ({
-    cwd,
-    hasUI: true,
-    isProjectTrusted: () => true,
-    ui: {
-      notify: (msg: string, level?: string) => notifications.push({ msg, level }),
-      setStatus: (_key: string, val?: string) => statuses.push(val),
-      select: async (title: string, _opts: string[], opts?: { signal?: AbortSignal }) => {
-        if (title.includes("needs authorization")) {
-          return "Not now";
-        }
-        markBrowserWaiting();
-        return new Promise<string | undefined>((resolve) => {
-          opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-        });
-      },
-    },
   });
+
+  const makeCtx = (cwd: string) =>
+    createMockContext({
+      cwd,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: {
+        notify: (msg: string, level?: string) => notifications.push({ msg, level }),
+        setStatus: (_key: string, val?: string) => statuses.push(val),
+        select: async (title: string, _opts: string[], opts?: { signal?: AbortSignal }) => {
+          if (title.includes("needs authorization")) {
+            return "Not now";
+          }
+          markBrowserWaiting();
+          return new Promise<string | undefined>((resolve) => {
+            opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+          });
+        },
+      },
+    });
 
   try {
     await mkdir(join(cwd1, ".pi"), { recursive: true });
@@ -1065,7 +1094,7 @@ it("should perform full teardown on session_start config reload or config load f
       }),
     );
 
-    await extension(pi as any, {
+    await extension(pi, {
       bootstrapCwd: cwd1,
       globalConfigPath: join(baseDir, "absent-global.json"),
       authStorageDir: authDir,
@@ -1106,12 +1135,12 @@ it("should perform full teardown on session_start config reload or config load f
 
     // Also verify ToolBridge.updateSettings updates tool-call timeouts for servers using global default
     // while preserving explicit per-server requestTimeoutMs overrides
-    const unitPiTools = new Map<string, any>();
-    const unitPi = {
-      registerTool: (t: any) => unitPiTools.set(t.name, t),
-      getActiveTools: () => [],
-      setActiveTools: () => {},
-    };
+    const unitPiTools = createStrictMap<string, ToolDefinition>();
+    const unitPi = makeBridgeApi(
+      (t: ToolDefinition) => unitPiTools.set(t.name, t),
+      () => [],
+      () => {},
+    );
     const initialSettings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 0 };
     const unitManager = new ServerManager({
       settings: initialSettings,
@@ -1139,18 +1168,26 @@ it("should perform full teardown on session_start config reload or config load f
 
       unitBridge.updateSettings({ toolPrefix: "mcp", requestTimeoutMs: 7777, maxRetries: 0 });
 
-      const defaultClient = unitManager.getServer("defaultTimeoutSrv")!.client! as any;
+      const defaultClient = unitManager.getServer("defaultTimeoutSrv")!.client!;
       let defaultCallTimeout: number | undefined;
       const origDefaultReq = defaultClient.request.bind(defaultClient);
-      defaultClient.request = async (req: any, schema: any, opts?: any) => {
+      defaultClient.request = async (
+        req: Parameters<Client["request"]>[0],
+        schema: Parameters<Client["request"]>[1],
+        opts?: Parameters<Client["request"]>[2],
+      ) => {
         if (req.method === "tools/call") defaultCallTimeout = opts?.timeout;
         return origDefaultReq(req, schema, opts);
       };
 
-      const explicitClient = unitManager.getServer("explicitTimeoutSrv")!.client! as any;
+      const explicitClient = unitManager.getServer("explicitTimeoutSrv")!.client!;
       let explicitCallTimeout: number | undefined;
       const origExplicitReq = explicitClient.request.bind(explicitClient);
-      explicitClient.request = async (req: any, schema: any, opts?: any) => {
+      explicitClient.request = async (
+        req: Parameters<Client["request"]>[0],
+        schema: Parameters<Client["request"]>[1],
+        opts?: Parameters<Client["request"]>[2],
+      ) => {
         if (req.method === "tools/call") explicitCallTimeout = opts?.timeout;
         return origExplicitReq(req, schema, opts);
       };
@@ -1164,7 +1201,7 @@ it("should perform full teardown on session_start config reload or config load f
       await unitManager.shutdownAll();
     }
   } finally {
-    await events.get("session_shutdown")?.({}, makeCtx(baseDir));
+    await events.get("session_shutdown")({}, makeCtx(baseDir));
     await fakeOAuth.close();
     await rm(baseDir, { recursive: true, force: true });
   }

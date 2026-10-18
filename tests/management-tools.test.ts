@@ -6,44 +6,39 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import extension from "../src/index.js";
 import { acquireAuthLock, getAuthStatus, McpOAuthProvider } from "../src/oauth-provider.js";
+import { createMockExtension, createMockContext } from "./helpers/mock-extension.js";
 
 it("registers agent-visible status and connect tools without eagerly starting a lazy server", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-management-"));
   const mock = join(dirname(fileURLToPath(import.meta.url)), "mock-server.ts");
   const tsxEsmLoader = import.meta.resolve("tsx/esm");
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
-  const commands = new Map<string, any>();
-  let active: string[] = [];
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: (name: string, command: any) => commands.set(name, command),
-    on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
-  };
-  const ctx = { cwd: dir, hasUI: false, ui: { notify: () => {}, select: async () => undefined } } as any;
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
+  const commands = mockExt.commands;
+  const ctx = createMockContext({ cwd: dir, hasUI: false });
   try {
     await mkdir(join(dir, ".pi"));
     await writeFile(join(dir, ".pi", "mcp.json"), JSON.stringify({
       settings: { maxRetries: 0 },
       mcpServers: { lazy: { command: "node", args: ["--import", tsxEsmLoader, mock], lifecycle: "lazy" } },
     }));
-    await extension(pi as any, { bootstrapCwd: dir, globalConfigPath: join(dir, "absent-global.json") });
+    await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "absent-global.json") });
     assert.ok(tools.has("mcp_status"));
     assert.ok(tools.has("mcp_connect"));
     assert.equal(
-      tools.get("mcp_status").promptSnippet,
+      tools.get("mcp_status")?.promptSnippet,
       "Inspect configured MCP servers, their connection state, discovered tools, and authentication status.",
     );
     assert.equal(
-      tools.get("mcp_connect").promptSnippet,
+      tools.get("mcp_connect")?.promptSnippet,
       "Connect or reconnect to a configured MCP server by name and register its tools.",
     );
     await events.get("session_start")({}, ctx);
+    let active = mockExt.activeTools;
     assert.equal(active.length, 0);
     const status = await tools.get("mcp_status").execute("", {}, undefined, undefined, ctx);
-    assert.deepEqual(JSON.parse(status.content[0].text).map((row: any) => [row.name, row.lifecycle, row.state]), [["lazy", "lazy", "stopped"]]);
+    assert.deepEqual(JSON.parse(status.content[0].text).map((row: { name: string; lifecycle: string; state: string }) => [row.name, row.lifecycle, row.state]), [["lazy", "lazy", "stopped"]]);
     await assert.rejects(tools.get("mcp_connect").execute("", { name: "unknown" }, undefined, undefined, ctx), /Unknown MCP server name/);
     const abortedStarter = new AbortController();
     const abortedJoiner = new AbortController();
@@ -57,6 +52,7 @@ it("registers agent-visible status and connect tools without eagerly starting a 
       assert.rejects(second, /cancelled/),
       third,
     ]);
+    active = mockExt.activeTools;
     assert.match(result.content[0].text, /ready/);
     assert.ok(active.some((name) => name.includes("echo")));
     assert.ok(commands.has("mcp:start") && commands.has("mcp:stop") && commands.has("mcp:auth"));
@@ -64,22 +60,25 @@ it("registers agent-visible status and connect tools without eagerly starting a 
     const connectedStatus = JSON.parse((await tools.get("mcp_status").execute("", {}, undefined, undefined, ctx)).content[0].text);
     assert.deepEqual(connectedStatus[0].tools, { discovered, active: discovered });
     // Another extension may apply an intentional tool restriction after discovery.
-    active = active.slice(1);
+    mockExt.activeTools = mockExt.activeTools.slice(1);
     await assert.rejects(
       tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx),
       /connected, but some discovered tools are inactive/,
     );
+    active = mockExt.activeTools;
     assert.equal(active.length, discovered - 1, "Connect must not override another extension's restriction");
-    active = [];
+    mockExt.activeTools = [];
     await assert.rejects(
       tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx),
       /connected, but some discovered tools are inactive/,
     );
+    active = mockExt.activeTools;
     assert.deepEqual(active, []);
     const inactiveStatus = JSON.parse((await tools.get("mcp_status").execute("", {}, undefined, undefined, ctx)).content[0].text);
     assert.equal(inactiveStatus[0].state, "ready", "Transport readiness and tool activation are separate states");
     assert.deepEqual(inactiveStatus[0].tools, { discovered, active: 0 });
     await events.get("session_shutdown")({}, ctx);
+    active = mockExt.activeTools;
     assert.equal(active.length, 0);
   } finally {
     await events.get("session_shutdown")?.({}, ctx);
@@ -90,13 +89,9 @@ it("registers agent-visible status and connect tools without eagerly starting a 
 it("reports headless OAuth as an actionable failure without opening a browser or exposing secrets", async () => {
   const { createServer } = await import("node:http");
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-headless-"));
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => [], setActiveTools: () => {},
-  };
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
   let base = "";
   let requests = 0;
   const listener = createServer((req, res) => {
@@ -115,14 +110,18 @@ it("reports headless OAuth as an actionable failure without opening a browser or
   const address = listener.address();
   assert.ok(address && typeof address === "object");
   base = `http://127.0.0.1:${address.port}`;
-  const ctx = { cwd: dir, hasUI: false, ui: { notify: () => {}, select: () => assert.fail("No UI") } } as any;
+  const ctx = createMockContext({
+    cwd: dir,
+    hasUI: false,
+    ui: { notify: () => {}, select: () => assert.fail("No UI") },
+  });
   try {
     await mkdir(join(dir, ".pi"));
     await writeFile(join(dir, ".pi", "mcp.json"), JSON.stringify({
       settings: { maxRetries: 2 },
       mcpServers: { private: { transport: "streamable-http", url: `${base}/mcp`, auth: { type: "oauth", clientId: "local" }, headers: { Authorization: "Bearer secret-never-report" }, lifecycle: "lazy" } },
     }));
-    await extension(pi as any, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json"), authStorageDir: join(dir, "auth") });
+    await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json"), authStorageDir: join(dir, "auth") });
     await events.get("session_start")({}, ctx);
     await assert.rejects(tools.get("mcp_connect").execute("", { name: "private" }, undefined, undefined, ctx), /requires an interactive Pi session/);
     assert.equal(requests, 1);
@@ -138,18 +137,14 @@ it("reports headless OAuth as an actionable failure without opening a browser or
 
 it("cancels a management connect during retry delay", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-cancel-connect-"));
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => [], setActiveTools: () => {},
-  };
-  const ctx = { cwd: dir, hasUI: false, ui: { notify: () => {} } } as any;
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
+  const ctx = createMockContext({ cwd: dir, hasUI: false });
   try {
     await mkdir(join(dir, ".pi"));
     await writeFile(join(dir, ".pi", "mcp.json"), JSON.stringify({ settings: { maxRetries: 1 }, mcpServers: { broken: { command: "missing-pi-mcp-executable" } } }));
-    await extension(pi as any, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json") });
+    await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json") });
     await events.get("session_start")({}, ctx);
     const controller = new AbortController();
     const attempt = tools.get("mcp_connect").execute("", { name: "broken" }, controller.signal, undefined, ctx);
@@ -191,20 +186,17 @@ it("opens an interactive browser only once, reopens on Retry, and cancels withou
   const address = listener.address();
   assert.ok(address && typeof address === "object");
   base = `http://127.0.0.1:${address.port}`;
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
+  const commands = mockExt.commands;
   let opens = 0;
   let choices = 0;
-  const commands = new Map<string, any>();
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: (name: string, command: any) => commands.set(name, command), on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => [], setActiveTools: () => {},
-  };
-  const ctx = {
-    cwd: dir, hasUI: true,
+  const ctx = createMockContext({
+    cwd: dir,
+    hasUI: true,
     ui: { notify: () => {}, select: async (_title: string, options: string[]) => options.at(choices++ === 0 ? 0 : -1) },
-  } as any;
+  });
   try {
     await mkdir(join(dir, ".pi"));
     await writeFile(join(dir, ".pi", "mcp.json"), JSON.stringify({
@@ -212,7 +204,7 @@ it("opens an interactive browser only once, reopens on Retry, and cancels withou
         "local team": { lifecycle: "lazy", transport: "streamable-http", url: `${base}/mcp`, auth: { type: "oauth", clientId: "local-client", redirectUrl: `http://127.0.0.1:${callbackAddress.port}/callback` } },
       },
     }));
-    await extension(pi as any, {
+    await extension(mockExt.api, {
       bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json"), authStorageDir: join(dir, "auth"),
       browserOpen: () => { opens++; },
     });
@@ -281,21 +273,17 @@ it("does not expose an echoed Authorization header through connect errors or sta
   await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
   const address = listener.address();
   assert.ok(address && typeof address === "object");
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => [], setActiveTools: () => {},
-  };
-  const ctx = { cwd: dir, hasUI: false, ui: { notify: () => {} } } as any;
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
+  const ctx = createMockContext({ cwd: dir, hasUI: false });
   try {
     await mkdir(join(dir, ".pi"));
     await writeFile(join(dir, ".pi", "mcp.json"), JSON.stringify({
       settings: { maxRetries: 0 },
       mcpServers: { local: { transport: "streamable-http", url: `http://127.0.0.1:${address.port}/mcp`, headers: { Authorization: credential }, lifecycle: "lazy" } },
     }));
-    await extension(pi as any, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json") });
+    await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "no-global.json") });
     await events.get("session_start")({}, ctx);
     await assert.rejects(
       tools.get("mcp_connect").execute("", { name: "local" }, undefined, undefined, ctx),
@@ -322,17 +310,10 @@ it("isolates a corrupt OAuth state file in mcp_status and recovers on first conn
   const dir = await mkdtemp(join(tmpdir(), "pi-mcp-corrupt-isolation-"));
   const authDir = join(dir, "auth");
   const fakeServer = await startFakeOAuthServer({ serverName: "corrupt-oauth", toolName: "recovered_tool" });
-  const tools = new Map<string, any>();
-  const events = new Map<string, any>();
-  let active: string[] = [];
-  const pi = {
-    registerTool: (tool: any) => tools.set(tool.name, tool),
-    registerCommand: () => {},
-    on: (name: string, handler: any) => events.set(name, handler),
-    getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
-  };
-  const ctx = {
+  const mockExt = createMockExtension();
+  const tools = mockExt.tools;
+  const events = mockExt.events;
+  const ctx = createMockContext({
     cwd: dir,
     hasUI: true,
     ui: {
@@ -342,7 +323,7 @@ it("isolates a corrupt OAuth state file in mcp_status and recovers on first conn
           opts?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
         }),
     },
-  } as any;
+  });
 
   try {
     await mkdir(join(dir, ".pi"));
@@ -373,7 +354,7 @@ it("isolates a corrupt OAuth state file in mcp_status and recovers on first conn
     await healthyProvider.saveTokens({ access_token: "healthy-token", token_type: "Bearer" });
     await writeFile(statePath("corrupt-oauth", authDir), "{corrupt-json-state", "utf8");
 
-    await extension(pi as any, {
+    await extension(mockExt.api, {
       bootstrapCwd: dir,
       globalConfigPath: join(dir, "no-global.json"),
       authStorageDir: authDir,
@@ -384,7 +365,7 @@ it("isolates a corrupt OAuth state file in mcp_status and recovers on first conn
     // Part 1: mcp_status isolates the corrupt file for corrupt-oauth without failing for healthy-oauth
     const origErr = console.error;
     console.error = () => {};
-    let statusRows: any[];
+    let statusRows: Array<{ name: string; auth?: string; [key: string]: unknown }> = [];
     try {
       const statusRes = await tools.get("mcp_status").execute("", {}, undefined, undefined, ctx);
       statusRows = JSON.parse(statusRes.content[0].text);
@@ -407,6 +388,7 @@ it("isolates a corrupt OAuth state file in mcp_status and recovers on first conn
     } finally {
       console.error = origErr2;
     }
+    const active = mockExt.activeTools;
     assert.ok(active.some((t) => t.includes("recovered_tool")));
   } finally {
     await events.get("session_shutdown")?.({}, ctx);
