@@ -312,7 +312,7 @@ export async function acquireAuthLock(
 
       process.once("exit", onExit);
 
-      heartbeatTimer = deps.clock.setInterval(async () => {
+      const heartbeatTick = async (): Promise<void> => {
         if (released || lost) return;
         const current = await readLockRecordWithRetry(deps.fs, path, usingRealFs);
         if (released || lost) return;
@@ -336,6 +336,9 @@ export async function acquireAuthLock(
             }
           }
         }
+      };
+      heartbeatTimer = deps.clock.setInterval(() => {
+        void heartbeatTick();
       }, HEARTBEAT_MS);
       heartbeatTimer.unref?.();
 

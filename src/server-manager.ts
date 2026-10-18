@@ -310,7 +310,7 @@ export function createTransport(
               rejectPendingStart = null;
               resolve();
             },
-            (err) => {
+            (err: unknown) => {
               rejectPendingStart = null;
               reject(err);
             },
@@ -871,7 +871,7 @@ export class ServerManager {
       }
       if (server.config.healthCheckIntervalMs) {
         let pingInFlight = false;
-        server.healthCheckTimer = setInterval(async () => {
+        const runHealthCheck = async (): Promise<void> => {
           if (pingInFlight || server.state !== "ready" || !server.client || signal.aborted) {
             return;
           }
@@ -917,6 +917,9 @@ export class ServerManager {
             }
             pingInFlight = false;
           }
+        };
+        server.healthCheckTimer = setInterval(() => {
+          void runHealthCheck();
         }, server.config.healthCheckIntervalMs);
       }
       // Unexpected transport close (e.g. the server subprocess crashes

@@ -266,6 +266,9 @@ Implements the **MCP 2025-03-26** specification for tool clients:
 # Install dependencies
 npm install
 
+# Lint (type-aware ESLint)
+npm run lint
+
 # Type check (strict mode)
 npm run typecheck
 

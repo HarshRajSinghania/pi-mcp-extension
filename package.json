@@ -42,11 +42,15 @@
     "typebox": "*"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
+    "eslint": "^10.13.0",
     "tsx": "^4.19.4",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.71.2"
   },
   "scripts": {
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx/esm --test ./tests/*.test.ts",
     "test:integration": "node --import tsx/esm --test ./tests/server-manager.test.ts"

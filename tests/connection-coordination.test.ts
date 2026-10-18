@@ -1,4 +1,5 @@
 import { describe, it } from "node:test";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -394,13 +395,16 @@ it("stop during a pending handshake prevents late readiness", async () => {
   const { createServer } = await import("node:http");
   const entered = gate();
   const response = gate();
-  const listener = createServer(async (_req, res) => {
+  const handleHandshake = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
     entered.release();
     await response.promise;
     if (!res.destroyed) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ jsonrpc: "2.0", id: 0, result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "mock", version: "1" } } }));
     }
+  };
+  const listener = createServer((_req, res) => {
+    void handleHandshake(_req, res);
   });
   await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
   const address = listener.address();

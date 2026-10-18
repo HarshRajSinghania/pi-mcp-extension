@@ -17,7 +17,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthRequiredError, McpOAuthProvider } from "../src/oauth-provider.js";
-import { Agent, createServer, request } from "node:http";
+import { Agent, createServer, request, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   callbackServerConfigFromRedirectUrl,
   DEFAULT_PORT,
@@ -268,7 +268,7 @@ describe("OAuth Security Fixes", () => {
           const guardTimer = setTimeout(() => reject(new Error("Challenge timeout did not abort the request")), 1000);
           init?.signal?.addEventListener("abort", () => {
             clearTimeout(guardTimer);
-            reject(init.signal?.reason);
+            reject(init.signal?.reason as unknown);
           }, { once: true });
         });
       };
@@ -621,7 +621,7 @@ describe("OAuth Security Fixes", () => {
           "test-server",
           callback.promise,
           () => assert.fail("Browser should not reopen when auth is cancelled"),
-          { hasUI: true, ui: ui as any },
+          { hasUI: true, ui },
         ),
         AuthCancelledError,
       );
@@ -1870,7 +1870,7 @@ describe("OAuth Security Fixes", () => {
           resourceMetadata: {
             resource: "https://global.example.com/mcp",
             authorization_servers: ["https://global.example.com"],
-          } as any,
+          },
         });
 
         // Same URL (ignoring trailing slash) sees stored state
@@ -1973,7 +1973,7 @@ describe("OAuth Security Fixes", () => {
           client_secret_expires_at: futureExpiry,
           token_endpoint_auth_method: "client_secret_post",
           redirect_uris: ["http://127.0.0.1:19876/callback"],
-        } as any);
+        });
 
         const loaded = (await p1.clientInformation()) as any;
         assert.strictEqual(loaded?.client_id, "dcr-1");
@@ -1999,7 +1999,7 @@ describe("OAuth Security Fixes", () => {
           client_id: "dcr-expired",
           client_secret: "secret-expired",
           client_secret_expires_at: pastExpiry,
-        } as any);
+        });
         assert.strictEqual(await p1.clientInformation(), undefined);
 
         const pSilent = new McpOAuthProvider("dcr-srv", { type: "oauth" }, undefined, dir, true);
@@ -2534,7 +2534,7 @@ describe("OAuth Security Fixes", () => {
         markChallengeEntered = resolve;
       });
 
-      const listener = createServer(async (req, res) => {
+      const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
         if (req.url === "/mcp") {
           mcpRequests++;
           // First request is silent startServer() -> 401 immediately so authorize() is entered.
@@ -2554,6 +2554,9 @@ describe("OAuth Security Fixes", () => {
         }
         res.writeHead(404);
         res.end();
+      };
+      const listener = createServer((req, res) => {
+        void handleRequest(req, res);
       });
       await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
       const addr = listener.address();

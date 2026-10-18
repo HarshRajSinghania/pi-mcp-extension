@@ -99,7 +99,7 @@ export async function startFakeOAuthServer(options: FakeOAuthServerOptions = {})
   const wwwAuthenticateHeader = () =>
     `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource/mcp" scope="mcp:tools"`;
 
-  const listener = createServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       const requestUrl = new URL(req.url ?? "/", baseUrl || "http://127.0.0.1");
       const { pathname, searchParams } = requestUrl;
@@ -383,6 +383,9 @@ export async function startFakeOAuthServer(options: FakeOAuthServerOptions = {})
       res.writeHead(500);
       res.end(err instanceof Error ? err.message : String(err));
     }
+  };
+  const listener = createServer((req, res) => {
+    void handleRequest(req, res);
   });
 
   await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));

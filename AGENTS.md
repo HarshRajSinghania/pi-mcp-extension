@@ -7,6 +7,7 @@ Instructions for AI coding agents (Pi, Claude Code, OpenCode, Codex, Cursor, Ant
 ## Commands
 
 ```bash
+npm run lint                                         # eslint . (type-aware flat config)
 npm run typecheck                                    # tsc --noEmit (strict, exactOptionalPropertyTypes, noUncheckedIndexedAccess, unused/return/override/fallthrough)
 npm test                                             # all suites: node --import tsx/esm --test ./tests/*.test.ts
 node --import tsx/esm --test tests/config.test.ts    # one suite
@@ -14,7 +15,7 @@ node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.t
 npm pack --dry-run                                   # tarball must contain only src/, README.md, LICENSE, package.json
 ```
 
-Node 22+ (CI runs 22 and 24). A change is done only when typecheck, test, and pack all pass.
+Node 22+ (CI runs 22 and 24). A change is done only when lint, typecheck, test, and pack all pass.
 
 ## Hard rules
 
@@ -89,7 +90,7 @@ Each of these was a real bug, and the listed suites guard it. If you touch the a
 1. **Reproduce:** write a deterministic failing test in `tests/` (fake clocks, transports, or deps; no wall-clock sleeps) before editing `src/`.
 2. **Trace:** follow the whole state machine, including abort, reload, and multi-process interleavings, not just the symptom.
 3. **Fix at the root**, keeping pure policy separate from I/O.
-4. **Verify:** run the new test, the full suite, typecheck, and pack.
+4. **Verify:** run the new test, the full suite, lint, typecheck, and pack.
 
 Self-review before finishing:
 - Are promises, timers, child processes, and abort listeners cleaned up on error, abort, and reload?

@@ -1,6 +1,6 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -184,7 +184,7 @@ it("should report usage on bare /mcp:auth --reset, support leading /mcp:auth --r
   const httpReached = new Promise<void>((resolve) => {
     markHttpEntered = resolve;
   });
-  const slowListener = createServer(async (_req, res) => {
+  const handleSlowRequest = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
     markHttpEntered();
     if (holdHttpConnect) {
       await httpEntered;
@@ -193,6 +193,9 @@ it("should report usage on bare /mcp:auth --reset, support leading /mcp:auth --r
       res.writeHead(500);
       res.end();
     }
+  };
+  const slowListener = createServer((_req, res) => {
+    void handleSlowRequest(_req, res);
   });
   await new Promise<void>((resolve) => slowListener.listen(0, "127.0.0.1", resolve));
   const slowAddr = slowListener.address();
