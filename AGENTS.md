@@ -14,6 +14,7 @@ npm run test:coverage                                # all suites with coverage 
 node --import tsx/esm --test tests/config.test.ts    # one suite
 node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.test.ts   # matching tests
 npm pack --dry-run                                   # tarball must contain only src/, README.md, LICENSE, package.json
+gitleaks git --redact -v                             # secret scan of the full git history (uses .gitleaks.toml)
 ```
 
 Node 22+ (CI runs 22 and 24). A change is done only when lint, typecheck, test, and pack all pass.
@@ -23,7 +24,7 @@ Node 22+ (CI runs 22 and 24). A change is done only when lint, typecheck, test, 
 1. **Never write to `stdout`** (`console.log`, `process.stdout`). It belongs to Pi's TUI/RPC stream. User-facing output goes through `ctx.ui.notify(...)` / `ctx.ui.setStatus("pi-mcp", ...)`; use `console.error("[pi-mcp] ...")` only when no UI context exists.
 2. **Pushing to `main` is a manual override only.** Always work on a branch and open a PR. Never push to `main`, publish, or tag unless the user explicitly instructs it for that change; every push to `main` can publish to npm (see [Commits & release](#commits--release)). Never run `npm publish` / `npm version`, edit `version` in `package.json`, or hand-write a versioned `CHANGELOG.md` heading.
 3. **No silent error swallowing.** No empty `catch {}` or `.catch(() => {})`. Handle expected codes (`ENOENT`, `ESRCH`, `EEXIST`) explicitly; an intentional best-effort teardown ignore needs a `// WHY:` comment.
-4. **Never log or surface secrets**: access/refresh tokens, `client_secret`, authorization codes, PKCE verifiers, `Authorization` headers.
+4. **Never log or surface secrets**: access/refresh tokens, `client_secret`, authorization codes, PKCE verifiers, `Authorization` headers. Never commit real credentials, even in fixtures. If `gitleaks` flags a real secret, revoke and rotate it first, then report it privately (GitHub private vulnerability reporting), never in a public issue or PR.
 5. **No new runtime dependencies without asking.** Runtime deps are only `@modelcontextprotocol/sdk` and `zod`. Pi packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`) and `typebox` are **peer** deps; never move them into `dependencies`, and never import the deprecated `@mariozechner/*` names.
 6. **No `any`.** Use `unknown` + narrowing or Zod. Preserve existing `// WHY:` comments; add one whenever you work around an MCP SDK, TypeBox, or Pi quirk.
 
@@ -108,6 +109,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 |---|---|---|
 | `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
 | `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
+| `secret-scan.yml` | `gitleaks` | No secrets in the PR's commits (pushes to `main`: the pushed range; weekly and on dispatch: full history). Output is redacted |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
 When you edit a workflow:

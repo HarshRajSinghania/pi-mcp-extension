@@ -1,0 +1,17 @@
+# Gitleaks configuration for pi-mcp-extension
+# Extends the default ruleset with project policies.
+#
+# Full repository history and working tree are clean under the default Gitleaks ruleset;
+# therefore, no allowlist entries are defined here to prevent dead exceptions or blinding files.
+#
+# If a future test fixture or mock ever trips a rule on a synthetic, non-sensitive string:
+# - Add a targeted [[allowlists]] entry specifying `targetRules = ["rule-id"]`
+#   and a specific `stopwords = ["exact-value"]` or `regexes = [...]`.
+# - Document each entry with a `# WHY:` comment explaining why the pattern is safe.
+# - NEVER allowlist an entire file path (e.g. tests/helpers/fake-oauth-server.ts),
+#   and NEVER allowlist the entire tests/ directory, which would blind actual leaks.
+
+title = "pi-mcp-extension gitleaks config"
+
+[extend]
+useDefault = true
