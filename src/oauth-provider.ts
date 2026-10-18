@@ -76,6 +76,9 @@ export function canonicalServerUrl(rawUrl: string): string {
     const path = u.pathname.length > 1 ? u.pathname.replace(/\/+$/, "") : u.pathname;
     return `${u.origin}${path}${u.search}`;
   } catch {
+    // WHY: new URL() throws TypeError per WHATWG URL spec on malformed or relative
+    // URL strings. Falling back to trimmed rawUrl allows graceful degradation for
+    // non-standard or unparseable URLs without crashing callers.
     return rawUrl.trim();
   }
 }
@@ -95,6 +98,9 @@ function isResourceCompatibleWithServerUrl(resource: string, expectedServerUrl: 
     const cfgPath = cfg.pathname.endsWith("/") ? cfg.pathname : `${cfg.pathname}/`;
     return reqPath.startsWith(cfgPath);
   } catch {
+    // WHY: new URL() throws TypeError per WHATWG URL spec if canonicalServerUrl produced
+    // an invalid or relative URL. If either URL cannot be parsed into an absolute URL,
+    // they cannot be origin/path-compatible, so returning false is the safe fallback.
     return false;
   }
 }
