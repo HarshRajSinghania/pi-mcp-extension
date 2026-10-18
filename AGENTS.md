@@ -32,7 +32,7 @@ Tests must pass on macOS and Windows too. Skip a test only when the behavior is 
 5. **No new runtime dependencies without asking.** Runtime deps are only `@modelcontextprotocol/sdk` and `zod`. Pi packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`) and `typebox` are **peer** deps; never move them into `dependencies`, and never import the deprecated `@mariozechner/*` names.
 6. **No `any`.** Use `unknown` + narrowing or Zod. Preserve existing `// WHY:` comments; add one whenever you work around an MCP SDK, TypeBox, or Pi quirk.
 
-Semgrep and ESLint enforce several of these rules. Suppress a finding only with a justified inline comment (`// nosemgrep: <rule-id> -- WHY: ...`).
+Semgrep and ESLint enforce several of these rules. Suppress a finding only with a justified inline comment (`// nosemgrep: <rule-id> -- WHY: ...`); never dismiss Semgrep alerts in the GitHub UI. CI drops suppressed findings before SARIF upload so in-source comments remain the single source of truth.
 
 ## Repository map
 
@@ -118,7 +118,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | `ci.yml` | `test (macos-latest)`, `test (windows-latest)` | `npm test` on Node 22. macOS is blocking; Windows is non-blocking (`continue-on-error`) until it's proven green (#54) |
 | `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
 | `secret-scan.yml` | `gitleaks` | No secrets in the PR's commits (pushes to `main`: the pushed range; weekly and on dispatch: full history). Output is redacted |
-| `semgrep.yml` | `semgrep` | Semgrep registry packs (`p/typescript`, `p/javascript`, `p/github-actions`) plus the custom rules in `.semgrep/rules/` that encode hard rules 1, 4, 5 and the security invariants above |
+| `semgrep.yml` | `semgrep` | Semgrep registry packs (`p/typescript`, `p/javascript`, `p/github-actions`) plus the custom rules in `.semgrep/rules/` that encode hard rules 1, 4, 5 and the security invariants above; drops in-source-suppressed findings before SARIF upload |
 | `dependency-review.yml` | `dependency-review` | Dependencies added or changed by the PR: no high/critical advisories and no copyleft licenses in runtime scope |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
