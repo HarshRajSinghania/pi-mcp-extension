@@ -140,7 +140,7 @@ it("does not retry an OAuth browser challenge or alter stored PKCE during a sile
   const manager = new ServerManager({
     settings: { toolPrefix: "mcp", requestTimeoutMs: 2000, maxRetries: 2 },
     mcpServers: { local: { lifecycle: "lazy", transport: "streamable-http", url: `${base}/mcp`, args: [], auth: { type: "oauth", clientId: "local-client" } } },
-  }, undefined, dir);
+  }, dir);
   const provider = new McpOAuthProvider("local", { clientId: "local-client" }, undefined, dir);
   try {
     await provider.saveCodeVerifier("existing-flow");
@@ -292,7 +292,6 @@ it("should fail immediately with AuthRequiredError and transition connectRequest
         },
       },
     },
-    undefined,
     authDir,
   );
   const provider = new McpOAuthProvider("local", { clientId: "local-client", redirectUrl }, undefined, authDir);
@@ -720,7 +719,7 @@ it("should recover SSE and StreamableHTTP servers on unexpected transport errors
         auth: { type: "oauth", clientId: "cid" },
       },
     },
-  }, undefined, join(dir, "auth"));
+  }, join(dir, "auth"));
 
   try {
     await manager.startServer("httpSrv", dir);

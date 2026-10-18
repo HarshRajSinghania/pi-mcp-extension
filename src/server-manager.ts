@@ -192,11 +192,6 @@ export type ToolRefreshCallback = (
 /** Called when background auto-recovery after a disconnect or health check fails. */
 export type RecoveryFailedCallback = (serverName: string, error: Error) => void;
 
-export interface TransportAuthCallbacks {
-  /** Legacy callback type. Background transport attempts never invoke this callback. */
-  onAuthRequired: (serverName: string, authorizationUrl: URL) => void | Promise<void>;
-}
-
 // ─── Transport Factory ────────────────────────────────────────────────────────
 
 export function createTransport(
@@ -338,7 +333,7 @@ export class ServerManager {
   private onServerStopped: ((name: string) => void) | null = null;
   private onRecoveryFailed: RecoveryFailedCallback | null = null;
 
-  constructor(config: McpConfig, _authCallbacks?: TransportAuthCallbacks, private readonly storageDir?: string) {
+  constructor(config: McpConfig, private readonly storageDir?: string) {
     this.settings = config.settings;
     for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
       this.servers.set(name, {
@@ -443,7 +438,7 @@ export class ServerManager {
     * Mark an OAuth server as requiring re-authorization when a mid-session
     * request (tools/list or tools/call) fails with 401/403 insufficient_scope.
     */
-  async handleUnauthorizedServerError(name: string, _cause?: unknown): Promise<void> {
+  async handleUnauthorizedServerError(name: string): Promise<void> {
     const server = this.servers.get(name);
     if (!server || !server.config.auth || server.config.transport === "stdio") {
       return;
@@ -908,6 +903,10 @@ export class ServerManager {
               }),
             ]);
           } catch {
+            // WHY: Ping failure triggers background recovery if the server is still ready.
+            // The ping error is intentionally not kept on lastError because _recover() →
+            // _shutdown() synchronously resets lastError during teardown before any reader
+            // observes it; if reconnection fails, _recover() records the failure on lastError.
             if (server.state === "ready" && !signal.aborted) {
               void this._recover(server, server.cwd ?? cwd);
             }

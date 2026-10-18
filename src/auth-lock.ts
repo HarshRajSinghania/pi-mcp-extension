@@ -171,6 +171,9 @@ export function parseLockRecord(raw: string): LockRecord | null {
     const result = LockRecordSchema.safeParse(parsed);
     return result.success ? result.data : null;
   } catch {
+    // WHY: JSON.parse on a string throws SyntaxError if the lock file is corrupt or
+    // partially written. LockRecordSchema.safeParse does not throw. Unparseable lock
+    // files map to null so isLockStale() can fall back to mtime-based staleness.
     return null;
   }
 }

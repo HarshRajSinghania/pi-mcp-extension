@@ -362,7 +362,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
   let config: McpConfig = mergeWithRegisteredServers(fileConfig, extensionServers);
 
   // ── 2. Initialize bridge components ──────────────────────────────────────
-  const manager = new ServerManager(config, undefined, paths.authStorageDir);
+  const manager = new ServerManager(config, paths.authStorageDir);
   const bridge = new ToolBridge(config.settings, pi);
   const connectAttempts = new Map<string, { promise: Promise<void>; controller: AbortController; reset: boolean; waiters: number }>();
   const declinedStartupAuth = new Set<string>();
@@ -639,8 +639,8 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       );
     }
   });
-  bridge.setAuthErrorCallback(async (serverName, err) => {
-    await manager.handleUnauthorizedServerError(serverName, err);
+  bridge.setAuthErrorCallback(async (serverName) => {
+    await manager.handleUnauthorizedServerError(serverName);
   });
 
   // ── 3. Session lifecycle ──────────────────────────────────────────────────
