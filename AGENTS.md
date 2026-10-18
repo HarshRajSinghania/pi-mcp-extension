@@ -152,5 +152,5 @@ Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. 
 - Because the scan covers everything since the last tag, a `docs:` push still publishes if unreleased `fix:` / `feat:` commits are already on `main`.
 - The bot creates the `chore: release vX.Y.Z` commit and the tag. Don't create them by hand.
 - Dependabot PRs are titled `chore(deps): ...`, `chore(deps-dev): ...`, or `ci(deps): ...`, so they don't release. When a runtime bump must raise the minimum version for users (e.g. a security floor), retitle it `fix(deps): ...` and add a `CHANGELOG.md` entry.
-- Releases never overlap (`concurrency: publish`) and are never cancelled mid-flight. The release job doesn't run `npm ci`, so no install script runs with the write token.
+- Releases never overlap (`concurrency: publish`) and are never cancelled mid-flight. The release job runs on Node 24 and uses its bundled npm (>= 11.5.1, verified fail-closed without downloads) for OIDC Trusted Publishing; it never runs `npm ci` or `npm install`, so no install script runs with the write token.
 - Maintainers can rehearse a release with `gh workflow run publish.yml -f dry_run=true`: it runs `npm publish --dry-run` and never commits, tags, or pushes (with no release-worthy commits it rehearses a patch). A real manual release (`dry_run=false`) is only allowed from `main`.
