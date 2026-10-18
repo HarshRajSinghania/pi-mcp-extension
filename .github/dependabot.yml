@@ -1,0 +1,65 @@
+# WHY: Commit prefixes matter because pull requests are squash-merged and publish.yml
+# decides npm releases automatically from commit subjects since the last tag:
+#   fix:, perf: -> patch release
+#   feat:       -> minor release
+#   anything else (chore:, ci:, docs:, test:, ...) -> no release
+# Dependabot's default "Bump x from ..." titles are not Conventional Commits.
+# By configuring prefix "chore" / "ci" with include: "scope", updates produce
+# chore(deps): ..., chore(deps-dev): ..., or ci(deps): ..., preventing accidental
+# npm releases. When a runtime dependency floor must rise for users (e.g., a security
+# floor or required SDK feature), a maintainer retitles the PR to fix(deps): ...
+# and adds a user-facing entry under ## [Unreleased] in CHANGELOG.md.
+
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # WHY: Supply-chain hygiene cooldown delays version-update PRs by 7 days so freshly
+    # published package versions aren't adopted immediately, giving the security community
+    # time to discover and yank malicious releases. Security updates are exempt from cooldown.
+    cooldown:
+      default-days: 7
+    # WHY: Conventional Commit prefixes: chore(deps): for production, chore(deps-dev): for dev.
+    # Both pass the Conventional Commit regex ^(feat|fix|perf|refactor|docs|test|chore|ci|build|style|revert)(\([a-z0-9,./-]+\))?(!?): [^ ].*$
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    # WHY: Keep version requirement unchanged if already satisfied (increase-if-necessary).
+    # dependabot-core does not parse peerDependencies as direct manifest update targets, and
+    # under increase-if-necessary any '*' range is already satisfied so it is never rewritten.
+    # An explicit ignore: list is intentionally omitted because it would also suppress automated
+    # security advisory PRs for lockfile copies of those dependencies.
+    versioning-strategy: increase-if-necessary
+    groups:
+      # Group runtime/production dependencies into one PR
+      production-dependencies:
+        dependency-type: "production"
+        patterns:
+          - "*"
+      # Group development dependencies into one PR
+      development-dependencies:
+        dependency-type: "development"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      # Group all GitHub Actions workflow updates into a single PR.
+      # Dependabot maintains 40-char SHA pins along with # vX.Y.Z comments.
+      github-actions:
+        patterns:
+          - "*"

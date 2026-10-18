@@ -111,10 +111,11 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 
 | Workflow | Job | What it enforces |
 |---|---|---|
-| `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
+| `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, `npm audit --omit=dev --audit-level=high` (Node 22), lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
 | `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
 | `secret-scan.yml` | `gitleaks` | No secrets in the PR's commits (pushes to `main`: the pushed range; weekly and on dispatch: full history). Output is redacted |
 | `semgrep.yml` | `semgrep` | Semgrep registry packs (`p/typescript`, `p/javascript`, `p/github-actions`) plus the custom rules in `.semgrep/rules/` that encode hard rules 1, 4, 5 and the security invariants above |
+| `dependency-review.yml` | `dependency-review` | Dependencies added or changed by the PR: no high/critical advisories and no copyleft licenses in runtime scope |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
 When you edit a workflow:
@@ -144,5 +145,6 @@ Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. 
 - For `feat` / `fix` / `perf` / breaking changes, add a user-facing entry under `## [Unreleased]` in `CHANGELOG.md`. The workflow stamps the version and date.
 - Because the scan covers everything since the last tag, a `docs:` push still publishes if unreleased `fix:` / `feat:` commits are already on `main`.
 - The bot creates the `chore: release vX.Y.Z` commit and the tag. Don't create them by hand.
+- Dependabot PRs are titled `chore(deps): ...`, `chore(deps-dev): ...`, or `ci(deps): ...`, so they don't release. When a runtime bump must raise the minimum version for users (e.g. a security floor), retitle it `fix(deps): ...` and add a `CHANGELOG.md` entry.
 - Releases never overlap (`concurrency: publish`) and are never cancelled mid-flight. The release job doesn't run `npm ci`, so no install script runs with the write token.
 - Maintainers can rehearse a release with `gh workflow run publish.yml -f dry_run=true`: it runs `npm publish --dry-run` and never commits, tags, or pushes (with no release-worthy commits it rehearses a patch). A real manual release (`dry_run=false`) is only allowed from `main`.

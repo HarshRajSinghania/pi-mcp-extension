@@ -47,6 +47,11 @@ jobs:
         # WHY: checks registry signatures and provenance attestations of every installed package.
         run: npm audit signatures
 
+      - name: Audit production dependencies
+        # WHY: same gate as ci.yml; only runtime dependencies reach users.
+        if: matrix.node-version == 22
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint
         run: npm run lint
 
