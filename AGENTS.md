@@ -118,6 +118,8 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | `dependency-review.yml` | `dependency-review` | Dependencies added or changed by the PR: no high/critical advisories and no copyleft licenses in runtime scope |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
+`scorecard.yml` (OpenSSF Scorecard) runs on pushes to `main` and weekly, not on PRs. Results go to code scanning and the README badge.
+
 When you edit a workflow:
 
 - Pin every `uses:` to a full 40-character commit SHA with a `# vX.Y.Z` comment. Never use a tag or branch.
