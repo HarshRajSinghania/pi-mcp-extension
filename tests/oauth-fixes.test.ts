@@ -17,7 +17,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthRequiredError, McpOAuthProvider } from "../src/oauth-provider.js";
-import type { AuthConfig } from "../src/oauth-provider.js";
 import { Agent, createServer, request } from "node:http";
 import {
   callbackServerConfigFromRedirectUrl,
