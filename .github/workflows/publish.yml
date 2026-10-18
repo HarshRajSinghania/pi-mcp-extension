@@ -2,36 +2,106 @@ name: Publish npm Package
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run npm publish --dry-run (rehearsal only; no commit, tag, or push)"
+        type: boolean
+        default: true
 
-permissions:
-  contents: write
-  id-token: write
+# Deny all permissions at the workflow level; jobs request only what they need.
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false # never cancel a release mid-flight
 
 jobs:
-  publish:
+  verify:
+    name: verify
+    # WHY: Release gate mirroring ci.yml to ensure every release is fully verified
+    # against both supported Node versions before minting tokens or publishing.
+    # Keep this job in sync with the check job in ci.yml.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # WHY: read repository contents to run checks
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: [22, 24]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
+          # WHY: do not use cache: npm here. Avoid cache poisoning in a release workflow.
 
-      - name: Upgrade npm (required for OIDC Trusted Publishing)
-        run: npm install -g npm@11
+      - run: npm ci --no-audit --no-fund
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Verify registry signatures
+        # WHY: checks registry signatures and provenance attestations of every installed package.
+        run: npm audit signatures
+
+      - name: Lint
+        run: npm run lint
 
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Test with coverage
+        if: matrix.node-version == 22
+        run: npm run test:coverage
+
       - name: Test
+        if: matrix.node-version != 22
         run: npm test
+
+      - name: Tarball sanity check
+        run: npm pack --dry-run
+
+  release:
+    name: release
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: write # WHY: commit the version bump and push git tags / release commits back to main
+      id-token: write # WHY: mint Sigstore provenance attestations for npm OIDC Trusted Publishing
+    timeout-minutes: 15
+    env:
+      # DRY_RUN is true only when manually dispatched with dry_run=true.
+      # Push events or dispatch with dry_run=false evaluate to false.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - name: Validate dispatch target
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        env:
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT_REF" != "refs/heads/main" ]; then
+            echo "::error::Manual release dispatch with dry_run=false is only allowed on refs/heads/main (got ${EVENT_REF})"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          # WHY: do not use cache: npm here. Avoid cache poisoning in a release workflow.
+
+      - name: Upgrade npm (required for OIDC Trusted Publishing)
+        # zizmor: ignore[adhoc-packages]
+        # WHY: exact pin per spec; npm 11.21.1 supports OIDC Trusted Publishing with provenance.
+        run: npm install -g npm@11.21.1
 
       - name: Determine version bump
         id: bump
@@ -62,16 +132,25 @@ jobs:
             BUMP="patch"
           fi
 
+          # Dry-run rehearsal: if bump is none and DRY_RUN is true, simulate a patch bump so the
+          # dry-run workflow exercises version stamping, package inspection, and dry-run publishing.
+          if [ "$BUMP" = "none" ] && [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::Dry run rehearsal: detected bump is 'none', using 'patch' for rehearsal"
+            BUMP="patch"
+          fi
+
           echo "bump=${BUMP}" >> "$GITHUB_OUTPUT"
           echo "Detected bump level: ${BUMP}"
 
       - name: Bump version
         if: steps.bump.outputs.bump != 'none'
         id: version
+        env:
+          BUMP_LEVEL: ${{ steps.bump.outputs.bump }}
         run: |
           # Bump the version in package.json (no commit, no tag yet)
           OLD_VERSION=$(node -p "require('./package.json').version")
-          npm version ${{ steps.bump.outputs.bump }} --no-git-tag-version --allow-same-version
+          npm version "$BUMP_LEVEL" --no-git-tag-version --allow-same-version
           NEW_VERSION=$(node -p "require('./package.json').version")
           if [ -f CHANGELOG.md ]; then
             sed -i "s/^## \[Unreleased\]/## [Unreleased]\n\n## [${NEW_VERSION}] - $(date -u +%Y-%m-%d)/" CHANGELOG.md
@@ -88,13 +167,21 @@ jobs:
             echo "Version ${VERSION} already published — skipping."
             echo "publish=false" >> "$GITHUB_ENV"
           else
-            npm publish --access public --provenance
-            echo "Published ${PACKAGE}@${VERSION}"
-            echo "publish=true" >> "$GITHUB_ENV"
+            if [ "$DRY_RUN" = "true" ]; then
+              npm publish --access public --provenance --dry-run
+              echo "Published (dry run) ${PACKAGE}@${VERSION}"
+              echo "publish=false" >> "$GITHUB_ENV"
+            else
+              npm publish --access public --provenance
+              echo "Published ${PACKAGE}@${VERSION}"
+              echo "publish=true" >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Commit version bump and tag
-        if: steps.bump.outputs.bump != 'none' && env.publish == 'true'
+        if: steps.bump.outputs.bump != 'none' && env.publish == 'true' && env.DRY_RUN != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -105,5 +192,6 @@ jobs:
           git add package.json package-lock.json
           git commit -m "chore: release v${VERSION}"
           git tag "v${VERSION}"
-          git push
-          git push --tags
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin HEAD:main
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin "v${VERSION}"
