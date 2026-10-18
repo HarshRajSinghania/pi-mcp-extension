@@ -28,7 +28,7 @@ Tests must pass on macOS and Windows too. Skip a test only when the behavior is 
 1. **Never write to `stdout`** (`console.log`, `process.stdout`). It belongs to Pi's TUI/RPC stream. User-facing output goes through `ctx.ui.notify(...)` / `ctx.ui.setStatus("pi-mcp", ...)`; use `console.error("[pi-mcp] ...")` only when no UI context exists.
 2. **Pushing to `main` is a manual override only.** Always work on a branch and open a PR. Never push to `main`, publish, or tag unless the user explicitly instructs it for that change; every push to `main` can publish to npm (see [Commits & release](#commits--release)). Never run `npm publish` / `npm version`, edit `version` in `package.json`, or hand-write a versioned `CHANGELOG.md` heading.
 3. **No silent error swallowing.** No empty `catch {}` or `.catch(() => {})`. Handle expected codes (`ENOENT`, `ESRCH`, `EEXIST`) explicitly; an intentional best-effort teardown ignore needs a `// WHY:` comment.
-4. **Never log or surface secrets**: access/refresh tokens, `client_secret`, authorization codes, PKCE verifiers, `Authorization` headers. Never commit real credentials, even in fixtures. If `gitleaks` flags a real secret, revoke and rotate it first, then report it privately (GitHub private vulnerability reporting), never in a public issue or PR.
+4. **Never log or surface secrets**: access/refresh tokens, `client_secret`, authorization codes, PKCE verifiers, `Authorization` headers. Never commit real credentials, even in fixtures. If `gitleaks` flags a real secret, revoke and rotate it first, then report it privately as described in [`SECURITY.md`](SECURITY.md), never in a public issue or PR.
 5. **No new runtime dependencies without asking.** Runtime deps are only `@modelcontextprotocol/sdk` and `zod`. Pi packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`) and `typebox` are **peer** deps; never move them into `dependencies`, and never import the deprecated `@mariozechner/*` names.
 6. **No `any`.** Use `unknown` + narrowing or Zod. Preserve existing `// WHY:` comments; add one whenever you work around an MCP SDK, TypeBox, or Pi quirk.
 
@@ -52,7 +52,7 @@ Semgrep and ESLint enforce several of these rules. Suppress a finding only with 
 
 Tests live in `tests/*.test.ts` (`node:test` + `node:assert/strict`, run through `tsx`). Fixtures: `tests/mock-server.ts`, `tests/helpers/`. Keep tests out of `src/`.
 
-User-facing docs to keep in sync with behavior changes: `README.md` (config, commands, tools), `OAUTH.md` (auth flows), `examples/mcp.json.example` (config schema), `CHANGELOG.md`.
+User-facing docs to keep in sync with behavior changes: `README.md` (config, commands, tools), `OAUTH.md` (auth flows), `examples/mcp.json.example` (config schema), `CHANGELOG.md`, and `SECURITY.md` (security scope and reporting). `.github/CODEOWNERS` lists the security-sensitive paths.
 
 > [!NOTE]
 > `index.ts`, `server-manager.ts`, `tool-bridge.ts`, and `oauth-provider.ts` exceed the ~400-line target. Do **not** split them opportunistically inside a fix or feature change; extraction is a planned, separate `refactor:` change. Put substantial new pure logic in a focused module instead of growing these files.
