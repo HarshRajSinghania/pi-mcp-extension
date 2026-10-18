@@ -290,6 +290,10 @@ The test suite includes:
 - **Tool bridge & management tools** — JSON Schema → TypeBox conversion, name sanitization, image content passthrough, `isError` filtering, activate/deactivate, `mcp_status` / `mcp_connect`, and slash command completions
 - **End-to-end integration** — Real mock MCP and OAuth servers over stdio and HTTP with tool discovery and execution
 
+## Security
+
+Please report vulnerabilities privately, not in public issues. See [SECURITY.md](https://github.com/irahardianto/pi-mcp-extension/blob/main/SECURITY.md) for scope, supported versions, and how to report.
+
 ## License
 
 MIT
