@@ -1,7 +1,7 @@
 # Default owner for everything in the repository
 * @irahardianto
 
-# GitHub Actions workflows, Dependabot, and repository configuration
+# GitHub Actions workflows, Dependabot, repository rulesets, and configuration
 /.github/ @irahardianto
 
 # Security policy

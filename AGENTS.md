@@ -55,7 +55,7 @@ Semgrep and ESLint enforce several of these rules. Suppress a finding only with 
 
 Tests live in `tests/*.test.ts` (`node:test` + `node:assert/strict`, run through `tsx`). Fixtures: `tests/mock-server.ts`, `tests/helpers/`. Property-based fuzz tests live in `tests/fuzz.test.ts` (using `fast-check`, detected by OpenSSF Scorecard). Keep tests out of `src/`.
 
-User-facing docs to keep in sync with behavior changes: `README.md` (config, commands, tools), `OAUTH.md` (auth flows), `examples/mcp.json.example` (config schema), `CHANGELOG.md`, and `SECURITY.md` (security scope and reporting). `.github/CODEOWNERS` lists the security-sensitive paths.
+User-facing docs and repository policies to keep in sync with behavior changes: `README.md` (config, commands, tools), `OAUTH.md` (auth flows), `examples/mcp.json.example` (config schema), `CHANGELOG.md`, `SECURITY.md` (security scope and reporting), and `.github/rulesets/default-branch.json` (branch protection ruleset). `.github/CODEOWNERS` lists the security-sensitive paths.
 
 > [!NOTE]
 > `index.ts`, `server-manager.ts`, `tool-bridge.ts`, and `oauth-provider.ts` exceed the ~400-line target. Do **not** split them opportunistically inside a fix or feature change; extraction is a planned, separate `refactor:` change. Put substantial new pure logic in a focused module instead of growing these files.
@@ -124,7 +124,29 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | `dependency-review.yml` | `dependency-review` | Dependencies added or changed by the PR: no high/critical advisories and no copyleft licenses in runtime scope |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
-`scorecard.yml` (OpenSSF Scorecard) runs on pushes to `main` and weekly, not on PRs. Results go to code scanning and the README badge.
+### OpenSSF Scorecard
+
+`scorecard.yml` runs on pushes to `main`, weekly, and on dispatch. It publishes signed results to api.scorecard.dev (the README badge) and uploads SARIF to code scanning. Scorecard alerts are repository-level, so an accepted risk is dismissed in the GitHub UI with a written reason. Semgrep alerts are never dismissed there (see [Hard rules](#hard-rules)).
+
+| Check | How this repo satisfies it | Don't regress |
+|---|---|---|
+| `Pinned-Dependencies` | Actions are pinned by commit SHA, installs use `npm ci`, downloaded binaries are checksum-verified, and the release job uses Node 24's bundled npm | No `npm install -g`, `npx <pkg>@<ver>`, `pip install`, or `curl \| sh` in workflows |
+| `SAST` | Semgrep and zizmor upload SARIF on every PR. Scorecard counts the last 30 PR-merged commits (direct release-bot pushes are excluded), so older pre-Semgrep commits age out | Never skip the SARIF uploads on same-repo PRs |
+| `Fuzzing` | `tests/fuzz.test.ts` imports `fast-check` (Scorecard detects that import) and runs under `npm test` | Keep that import form and the file in `tests/` |
+| `Token-Permissions`, `Dangerous-Workflow` | `permissions: {}` / `contents: read` at workflow level, untrusted input only through `env:` | Enforced by zizmor and actionlint |
+| `Branch-Protection` | Repository ruleset from `.github/rulesets/default-branch.json` (see below) | Keep the live ruleset identical to the file |
+| `Code-Review` | Accepted risk: a solo maintainer can't get approvals, since Scorecard needs a reviewer or merger other than the author. Dismiss as "won't fix" | Revisit when a second maintainer joins |
+| `CII-Best-Practices` | Maintainer action: register and self-certify at [bestpractices.dev](https://www.bestpractices.dev) | n/a |
+
+**Branch ruleset as code.** `.github/rulesets/default-branch.json` is the source of truth for protecting `main`: it blocks deletion and force pushes, with no bypass actors (Scorecard tier 1). It deliberately does **not** require PRs, reviews, or status checks:
+- A solo maintainer can't approve their own PRs.
+- The release job pushes `chore: release vX.Y.Z` straight to `main` with `GITHUB_TOKEN`. On a user-owned repo the GitHub Actions app can't be a ruleset bypass actor (the API returns 422), so such rules would break publishing. Branch rulesets don't apply to tags.
+
+```bash
+gh api repos/irahardianto/pi-mcp-extension/rulesets                                                                  # list live rulesets (check for drift)
+gh api --method POST repos/irahardianto/pi-mcp-extension/rulesets --input .github/rulesets/default-branch.json       # create
+gh api --method PUT repos/irahardianto/pi-mcp-extension/rulesets/<id> --input .github/rulesets/default-branch.json  # update
+```
 
 When you edit a workflow:
 
