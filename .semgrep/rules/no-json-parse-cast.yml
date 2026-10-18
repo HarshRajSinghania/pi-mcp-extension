@@ -1,0 +1,17 @@
+rules:
+  # AGENTS.md Architecture: "Never JSON.parse(x) as T" - validate with Zod.
+  - id: pi-mcp.no-json-parse-cast
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Don't cast JSON.parse output. Parse to `unknown` and validate with a Zod schema
+      (AGENTS.md -> Architecture).
+    paths:
+      include: ["/src/**"]
+    patterns:
+      - pattern-either:
+          - pattern: JSON.parse(...) as $T
+          - pattern: (JSON.parse(...) as $ANY) as $T
+      - metavariable-regex:
+          metavariable: $T
+          regex: ^(?!unknown$).+

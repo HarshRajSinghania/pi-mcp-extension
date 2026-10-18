@@ -1,0 +1,53 @@
+name: Semgrep
+
+on:
+  push:
+    branches: [main]
+  # WHY: no `branches:` filter. Stacked PRs (AGENTS.md -> Commits & release) target another
+  # PR's branch, not `main`, and must be checked before they land on `main` one by one.
+  pull_request:
+  schedule:
+    # Weekly Sunday midnight scan for newly published rules / vulnerability disclosures.
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+# Least privilege: workflow defaults to read-only repository access.
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; never cancel runs on `main` so every merged commit gets a result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # WHY: Required to upload SARIF results to GitHub code scanning
+
+    container:
+      # WHY: Pin container by SHA256 digest for supply-chain security (Semgrep 1.181.0).
+      image: semgrep/semgrep@sha256:81474464c1f07483ba0682a44787fd93c91397419762a04abe2bafaae396304b
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test custom Semgrep rules
+        run: semgrep --test --metrics=off .semgrep/
+
+      - name: Run Semgrep SAST scan
+        run: semgrep scan --metrics=off --config p/typescript --config p/javascript --config p/github-actions --config .semgrep/ --error --sarif --output semgrep.sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        # WHY: Run even if findings fail the scan step (if: always()), but skip on fork PRs where GITHUB_TOKEN lacks security-events: write.
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

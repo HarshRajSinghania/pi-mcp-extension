@@ -14,6 +14,8 @@ npm run test:coverage                                # all suites with coverage 
 node --import tsx/esm --test tests/config.test.ts    # one suite
 node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.test.ts   # matching tests
 npm pack --dry-run                                   # tarball must contain only src/, README.md, LICENSE, package.json
+semgrep --test --metrics=off .semgrep/               # custom Semgrep rules against their fixtures
+semgrep scan --metrics=off --config p/typescript --config p/javascript --config p/github-actions --config .semgrep/ --error   # the CI scan
 gitleaks git --redact -v                             # secret scan of the full git history (uses .gitleaks.toml)
 ```
 
@@ -27,6 +29,8 @@ Node 22+ (CI runs 22 and 24). A change is done only when lint, typecheck, test, 
 4. **Never log or surface secrets**: access/refresh tokens, `client_secret`, authorization codes, PKCE verifiers, `Authorization` headers. Never commit real credentials, even in fixtures. If `gitleaks` flags a real secret, revoke and rotate it first, then report it privately (GitHub private vulnerability reporting), never in a public issue or PR.
 5. **No new runtime dependencies without asking.** Runtime deps are only `@modelcontextprotocol/sdk` and `zod`. Pi packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`) and `typebox` are **peer** deps; never move them into `dependencies`, and never import the deprecated `@mariozechner/*` names.
 6. **No `any`.** Use `unknown` + narrowing or Zod. Preserve existing `// WHY:` comments; add one whenever you work around an MCP SDK, TypeBox, or Pi quirk.
+
+Semgrep and ESLint enforce several of these rules. Suppress a finding only with a justified inline comment (`// nosemgrep: <rule-id> -- WHY: ...`).
 
 ## Repository map
 
@@ -76,7 +80,7 @@ Each of these was a real bug, and the listed suites guard it. If you touch the a
 - OAuth state is also bound to the authorization server: persist and return the SDK's `issuer` on stored tokens and client information unchanged (including in silent mode and peer reloads), never re-bind a stamped client to another issuer, and never write a config-supplied `client_secret` to disk (GHSA-6qxp-vccf-f47h).
 - Sensitive files (`<hash>.json`, `<hash>.json.lock`) are written `0o600` inside `0o700` directories via temp file + `rename`. Corrupt state for one server must not break `mcp_status` for the others.
 - Refresh tokens are single-use. Before invalidating tokens, reload them from disk once in case a peer process already rotated them, and coordinate interactive writes through the auth lock.
-- Trigger OAuth only on a genuine HTTP 401 (during `initialize` **and** `tools/list`) or a 403 with `insufficient_scope`. Never substring-match `"401"` in error messages.
+- Trigger OAuth only on a genuine HTTP 401 (during `initialize` **and** `tools/list`) or a 403 with `insufficient_scope`. Never substring-match `"401"` in error messages. The only exception is the anchored message fallback inside `isOAuthUnauthorizedError`, after its structured checks; Semgrep `pi-mcp.no-401-substring` enforces this everywhere else.
 - Redirect URLs are loopback `http:`/`https:` with an explicit port. Validate callback `state` on success **and** on `?error=` responses. Only `http:`/`https:` authorization URLs reach the OS browser opener, and unvalidated strings never reach a shell.
 
 **Schema conversion** (`tool-bridge.test.ts`): Pi runs `Value.Convert(schema, args)` before validating.
@@ -110,6 +114,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
 | `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
 | `secret-scan.yml` | `gitleaks` | No secrets in the PR's commits (pushes to `main`: the pushed range; weekly and on dispatch: full history). Output is redacted |
+| `semgrep.yml` | `semgrep` | Semgrep registry packs (`p/typescript`, `p/javascript`, `p/github-actions`) plus the custom rules in `.semgrep/rules/` that encode hard rules 1, 4, 5 and the security invariants above |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
 When you edit a workflow:
