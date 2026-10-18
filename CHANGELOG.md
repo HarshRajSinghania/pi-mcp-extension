@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.8] - 2026-10-18
+
 ### Security
 - **OAuth authorization-server issuer binding (GHSA-6qxp-vccf-f47h)**: Require patched `@modelcontextprotocol/sdk` (`^1.32.1`) and persist the authorization server `issuer` property on stored client information and OAuth tokens. This prevents an untrusted or compromised MCP server from directing stored refresh tokens or client credentials to an arbitrary authorization server. Existing credentials saved prior to this fix remain valid and are stamped with their authorization server issuer on first use. Users who may have connected to untrusted MCP servers should revoke credentials and run `/mcp:auth <server> --reset` to force fresh client registration and re-authorization.
 
