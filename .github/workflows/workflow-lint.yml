@@ -1,0 +1,73 @@
+name: workflow-lint
+
+on:
+  push:
+    branches: [main]
+  # WHY: no `branches:` filter. Stacked PRs (AGENTS.md -> Commits & release) target another
+  # PR's branch, not `main`, and must be checked before they land on `main` one by one.
+  # WHY: no `paths:` filter. Required status checks in branch rulesets stay pending
+  # forever on PRs that do not touch the filtered paths. Linting takes seconds.
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege for every job: this workflow only reads repository contents by default.
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; never cancel runs on `main` so every merged commit gets a result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  workflow-lint:
+    name: workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write # Required for upload-sarif to upload SARIF results to GitHub Code Scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download actionlint
+        # WHY: Download pinned actionlint binary into $RUNNER_TEMP (outside workspace), verify checksum, and add to PATH.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/actionlint"
+          cd "${RUNNER_TEMP}"
+          curl -fsSL --retry 3 --retry-connrefused -O https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz" | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz -C "${RUNNER_TEMP}/actionlint" actionlint
+          rm -f actionlint_1.7.12_linux_amd64.tar.gz
+          echo "${RUNNER_TEMP}/actionlint" >> "$GITHUB_PATH"
+
+      - name: Run actionlint
+        # WHY: actionlint checks workflow syntax, expressions, and automatically runs shellcheck on run: scripts.
+        run: actionlint -color
+
+      - name: Run zizmor
+        id: zizmor
+        # WHY: zizmor checks GitHub Actions security posture (template injection, action pinning, permissions).
+        # We gate at --min-severity low (stricter than #49's suggested medium on purpose) because every
+        # workflow in the stack is hardened to be clean at the default persona, so low regressions should fail.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run zizmor==1.31.1 --min-severity low --format github .github/
+
+      - name: Generate zizmor SARIF
+        id: sarif
+        # WHY: Generate a SARIF report of all findings for Code Scanning ingestion, even if gating check failed.
+        if: always() && steps.zizmor.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run zizmor==1.31.1 --format sarif .github/ > zizmor.sarif
+
+      - name: Upload zizmor SARIF
+        # WHY: Upload findings to GitHub Code Scanning. Skipped on fork PRs where security-events: write is unavailable.
+        if: always() && steps.sarif.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor

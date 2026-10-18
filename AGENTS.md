@@ -107,6 +107,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | Workflow | Job | What it enforces |
 |---|---|---|
 | `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
+| `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
 | `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
 When you edit a workflow:
@@ -114,6 +115,8 @@ When you edit a workflow:
 - Pin every `uses:` to a full 40-character commit SHA with a `# vX.Y.Z` comment. Never use a tag or branch.
 - Grant least privilege: `permissions: contents: read` (or `{}`) at the workflow level, widened per job only where a step needs it.
 - Check out with `persist-credentials: false`, and give every job a `timeout-minutes`.
+- Never interpolate `${{ github.event.* }}`, `${{ inputs.* }}`, or `${{ steps.*.outputs.* }}` into `run:`. Pass them through `env:` and quote `"$VAR"`.
+- Run `actionlint` and `uvx zizmor@1.31.1 .github/` (or `pipx run zizmor==1.31.1 .github/`) before pushing; both must be clean.
 
 ## Commits & release
 
