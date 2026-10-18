@@ -398,12 +398,13 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
   });
 
   it("should pass cwd to StdioClientTransport and encode roots/list URI with pathToFileURL and basename (Issues 21.1, 21.2)", async () => {
-    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { mkdtemp, rm, writeFile, mkdir, realpath } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const { pathToFileURL } = await import("node:url");
-    const baseTmp = await mkdtemp(join(tmpdir(), "pi-mcp-cwd-"));
+    // WHY: On macOS, tmpdir() is under /var which is a symlink to /private/var.
+    // Child process.cwd() resolves symlinks, so canonicalize baseTmp to match on darwin and Windows 8.3 paths.
+    const baseTmp = await realpath(await mkdtemp(join(tmpdir(), "pi-mcp-cwd-")));
     const specialCwd = join(baseTmp, "work dir #1");
-    const { mkdir } = await import("node:fs/promises");
     await mkdir(specialCwd, { recursive: true });
 
     const sdkServerUrl = import.meta.resolve("@modelcontextprotocol/sdk/server/index.js");
@@ -499,23 +500,36 @@ setInterval(() => {}, 1000);
     );
 
     const manager = new ServerManager({
-      settings: { toolPrefix: "mcp", requestTimeoutMs: 100, maxRetries: 0 },
+      // WHY: 500ms timeout provides enough startup margin on slower macOS/Windows CI runners
+      // before initialize times out and triggers process termination.
+      settings: { toolPrefix: "mcp", requestTimeoutMs: 500, maxRetries: 0 },
       mcpServers: {
         hanger: {
           command: "node",
           args: [hangScript],
           transport: "stdio",
           lifecycle: "lazy",
-          requestTimeoutMs: 100,
+          requestTimeoutMs: 500,
         },
       },
     });
 
     try {
       await assert.rejects(() => manager.startServer("hanger", dir));
-      const pidText = await readFile(pidFile, "utf8");
+      let pidText = "";
+      for (let i = 0; i < 50; i++) {
+        try {
+          pidText = await readFile(pidFile, "utf8");
+          if (pidText.trim()) break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw err;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
       const childPid = Number(pidText.trim());
-      assert.ok(childPid > 0);
+      assert.ok(childPid > 0, `Expected child PID written to ${pidFile}`);
 
       // Process must already be dead by the time startServer rejects
       assert.throws(

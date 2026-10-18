@@ -19,7 +19,9 @@ semgrep scan --metrics=off --config p/typescript --config p/javascript --config 
 gitleaks git --redact -v                             # secret scan of the full git history (uses .gitleaks.toml)
 ```
 
-Node 22+ (CI runs 22 and 24). A change is done only when lint, typecheck, test, and pack all pass.
+Node 22+ (CI runs 22 and 24 on Linux, and 22 on macOS and Windows). A change is done only when lint, typecheck, test, and pack all pass.
+
+Tests must pass on macOS and Windows too. Skip a test only when the behavior is POSIX-only by design (e.g. file modes), and only on that platform: `{ skip: process.platform === "win32" && "WHY: <reason>" }`.
 
 ## Hard rules
 
@@ -112,6 +114,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | Workflow | Job | What it enforces |
 |---|---|---|
 | `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, `npm audit --omit=dev --audit-level=high` (Node 22), lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
+| `ci.yml` | `test (macos-latest)`, `test (windows-latest)` | `npm test` on Node 22. macOS is blocking; Windows is non-blocking (`continue-on-error`) until it's proven green (#54) |
 | `workflow-lint.yml` | `workflow-lint` | `actionlint` (syntax, expressions, shellcheck of `run:` scripts) and `zizmor` (Actions security: injection, pinning, permissions, credentials), failing on any finding of low severity or above |
 | `secret-scan.yml` | `gitleaks` | No secrets in the PR's commits (pushes to `main`: the pushed range; weekly and on dispatch: full history). Output is redacted |
 | `semgrep.yml` | `semgrep` | Semgrep registry packs (`p/typescript`, `p/javascript`, `p/github-actions`) plus the custom rules in `.semgrep/rules/` that encode hard rules 1, 4, 5 and the security invariants above |
