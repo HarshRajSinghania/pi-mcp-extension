@@ -210,6 +210,7 @@ describe("OAuth Security Fixes", () => {
 
       assert.strictEqual(directoryStats.isDirectory(), true);
       assert.strictEqual(fileStats.isFile(), true);
+      // WHY: Windows NTFS does not support POSIX octal file permission bits (0o600/0o700).
       if (process.platform !== "win32") {
         assert.strictEqual(directoryStats.mode & 0o777, 0o700);
         assert.strictEqual(fileStats.mode & 0o777, 0o600);
@@ -1356,11 +1357,14 @@ describe("OAuth Security Fixes", () => {
       assert.strictEqual(tokensAfter, undefined, "Tokens should not exist after reset");
     });
 
-    it("should surface EACCES when resetting auth in a read-only directory on POSIX", async (t) => {
-      if (process.platform === "win32" || process.getuid?.() === 0) {
-        t.skip("POSIX non-root directory permission semantics required");
-        return;
-      }
+    it(
+      "should surface EACCES when resetting auth in a read-only directory on POSIX",
+      {
+        skip:
+          (process.platform === "win32" || process.getuid?.() === 0) &&
+          "WHY: POSIX non-root directory permission semantics required (0o500 chmod is ignored on Windows)",
+      },
+      async () => {
 
       // Arrange
       const { chmod } = await import("node:fs/promises");
