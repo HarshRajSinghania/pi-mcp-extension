@@ -88,14 +88,16 @@ Tokens are stored per-server in `~/.pi/agent/mcp-auth/<hash>.json` (or `<agent d
 {
   "clientInfo": {
     "client_id": "...",
-    "client_secret": "..."
+    "client_secret": "...",
+    "issuer": "https://auth.example.com"
   },
   "tokens": {
     "access_token": "...",
     "refresh_token": "...",
     "expires_in": 3600,
     "scope": "read write",
-    "saved_at": "2025-01-01T00:00:00.000Z"
+    "saved_at": "2025-01-01T00:00:00.000Z",
+    "issuer": "https://auth.example.com"
   }
 }
 ```

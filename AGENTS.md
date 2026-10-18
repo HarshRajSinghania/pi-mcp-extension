@@ -72,6 +72,7 @@ Each of these was a real bug, and the listed suites guard it. If you touch the a
 **Security & OAuth** (`oauth-fixes.test.ts`, `auth-lock.test.ts`, `auth-commands.test.ts`, `pi-1x-compat.test.ts`)
 - Project trust: never read `<cwd>/.pi/mcp.json` during bootstrap or when `ctx.isProjectTrusted()` is false (`loadConfig` with `includeProjectConfig: false`).
 - OAuth state is origin-bound. The state file records `serverUrl` and is rejected on load if it doesn't match the configured URL (`urlsMatch`), so a project server that reuses a global server's name can't receive its tokens. Preserve DCR `token_endpoint_auth_method` and `redirect_uris`.
+- OAuth state is also bound to the authorization server: persist and return the SDK's `issuer` on stored tokens and client information unchanged (including in silent mode and peer reloads), never re-bind a stamped client to another issuer, and never write a config-supplied `client_secret` to disk (GHSA-6qxp-vccf-f47h).
 - Sensitive files (`<hash>.json`, `<hash>.json.lock`) are written `0o600` inside `0o700` directories via temp file + `rename`. Corrupt state for one server must not break `mcp_status` for the others.
 - Refresh tokens are single-use. Before invalidating tokens, reload them from disk once in case a peer process already rotated them, and coordinate interactive writes through the auth lock.
 - Trigger OAuth only on a genuine HTTP 401 (during `initialize` **and** `tools/list`) or a 403 with `insufficient_scope`. Never substring-match `"401"` in error messages.
