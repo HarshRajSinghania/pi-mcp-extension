@@ -12,6 +12,8 @@ npm run typecheck                                    # tsc --noEmit (strict, exa
 npm test                                             # all suites: node --import tsx/esm --test ./tests/*.test.ts
 npm run test:coverage                                # all suites with coverage floor (95% lines / 85% branches / 83% functions)
 node --import tsx/esm --test tests/config.test.ts    # one suite
+node --import tsx/esm --test tests/fuzz.test.ts      # property-based fuzz tests (fast-check)
+FAST_CHECK_SEED=123456789 node --import tsx/esm --test tests/fuzz.test.ts # replay exact fuzz seed
 node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.test.ts   # matching tests
 npm pack --dry-run                                   # tarball must contain only src/, README.md, LICENSE, package.json
 semgrep --test --metrics=off .semgrep/               # custom Semgrep rules against their fixtures
@@ -51,7 +53,7 @@ Semgrep and ESLint enforce several of these rules. Suppress a finding only with 
 | `src/terminal-text.ts` | Pure terminal/notification text sanitization (`sanitizeTerminalText`): strips ANSI/OSC/DCS/C1 escape sequences and C0/C1 control characters, collapses line breaks, and bounds string length on code-point boundaries |
 | `src/errors.ts` | `McpError` kinds `config \| connection \| auth \| timeout \| protocol`; `AuthRequiredError`, `AuthLockError`, `AuthCancelledError` |
 
-Tests live in `tests/*.test.ts` (`node:test` + `node:assert/strict`, run through `tsx`). Fixtures: `tests/mock-server.ts`, `tests/helpers/`. Keep tests out of `src/`.
+Tests live in `tests/*.test.ts` (`node:test` + `node:assert/strict`, run through `tsx`). Fixtures: `tests/mock-server.ts`, `tests/helpers/`. Property-based fuzz tests live in `tests/fuzz.test.ts` (using `fast-check`, detected by OpenSSF Scorecard). Keep tests out of `src/`.
 
 User-facing docs to keep in sync with behavior changes: `README.md` (config, commands, tools), `OAUTH.md` (auth flows), `examples/mcp.json.example` (config schema), `CHANGELOG.md`, and `SECURITY.md` (security scope and reporting). `.github/CODEOWNERS` lists the security-sensitive paths.
 
