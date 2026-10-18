@@ -15,7 +15,7 @@ export type McpErrorCode =
 export class McpError extends Error {
   public readonly server: string;
   public readonly code: McpErrorCode;
-  public readonly cause: unknown;
+  public override readonly cause: unknown;
 
   constructor(
     message: string,

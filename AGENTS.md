@@ -7,7 +7,7 @@ Instructions for AI coding agents (Pi, Claude Code, OpenCode, Codex, Cursor, Ant
 ## Commands
 
 ```bash
-npm run typecheck                                    # tsc --noEmit (strict, exactOptionalPropertyTypes, noUncheckedIndexedAccess)
+npm run typecheck                                    # tsc --noEmit (strict, exactOptionalPropertyTypes, noUncheckedIndexedAccess, unused/return/override/fallthrough)
 npm test                                             # all suites: node --import tsx/esm --test ./tests/*.test.ts
 node --import tsx/esm --test tests/config.test.ts    # one suite
 node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.test.ts   # matching tests
