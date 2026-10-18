@@ -107,6 +107,7 @@ Workflows live in `.github/workflows/`. The checks below run on every PR, whatev
 | Workflow | Job | What it enforces |
 |---|---|---|
 | `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
+| `pr-title.yml` | `pr-title` | PR title is a Conventional Commit; `feat` / `fix` / `perf` / `!` titles must change `CHANGELOG.md`; a PR-description line starting with `BREAKING CHANGE:` requires `!` in the title |
 
 When you edit a workflow:
 
@@ -118,7 +119,7 @@ When you edit a workflow:
 
 Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. `fix(oauth): ...`).
 
-- **Regular PRs are squash-merged**, so **the PR title becomes the commit that decides the release**.
+- **Regular PRs are squash-merged**, so **the PR title becomes the commit that decides the release**, and the PR description becomes the commit body. The `pr-title` check enforces both (see [CI](#ci)).
 - **Stacked PRs are the exception**: their commits can land on `main` individually, so every commit subject in a stack must be a correct Conventional Commit.
 
 `.github/workflows/publish.yml` runs on every push to `main`. Its `verify` job repeats the CI checks on Node 22 and 24 with a read-only token; only then does the `release` job (the only job with `contents: write` / `id-token: write`, in the `npm-publish` environment) scan **all commit subjects since the last tag** and publish automatically:
