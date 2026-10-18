@@ -1,0 +1,21 @@
+rules:
+  # AGENTS.md Security & OAuth: "Never substring-match "401" in error messages."
+  - id: pi-mcp.no-401-substring
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Trigger OAuth only on a genuine HTTP 401 (status / UnauthorizedError), never by
+      substring-matching "401" in a message (AGENTS.md -> Security & OAuth).
+    pattern-either:
+      - pattern: $X.includes("401")
+      - pattern: $X.indexOf("401")
+      - pattern: $X.match("401")
+      - pattern: $X.search("401")
+      - patterns:
+          - pattern-either:
+              - pattern: new RegExp($PATTERN, ...)
+              - pattern: RegExp($PATTERN, ...)
+          - metavariable-regex:
+              metavariable: $PATTERN
+              regex: ".*401.*"
+      - pattern-regex: /[^/\n]*401[^/\n]*/[a-z]*\.(test|exec)\(

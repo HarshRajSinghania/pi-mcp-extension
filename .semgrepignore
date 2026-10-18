@@ -1,0 +1,4 @@
+:include .gitignore
+
+# Test fixtures for custom Semgrep rules
+.semgrep/**

@@ -1,0 +1,18 @@
+rules:
+  # AGENTS.md hard rule 1: never write to stdout.
+  - id: pi-mcp.no-stdout
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      stdout belongs to Pi's TUI/RPC stream (AGENTS.md hard rule 1). Use ctx.ui.notify(...),
+      or console.error("[pi-mcp] ...") only when no UI context exists.
+    paths:
+      include: ["/src/**"]
+    pattern-either:
+      - pattern: console.log(...)
+      - pattern: console.info(...)
+      - pattern: console.debug(...)
+      - pattern: console.warn(...)
+      - pattern: console.table(...)
+      - pattern: console.dir(...)
+      - pattern: process.stdout.write(...)

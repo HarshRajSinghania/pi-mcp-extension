@@ -1,0 +1,21 @@
+rules:
+  # AGENTS.md hard rule 5: never import the deprecated @mariozechner/* names.
+  - id: pi-mcp.no-deprecated-pi-scope
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Do not import deprecated `@mariozechner/*` packages. Use `@earendil-works/*`
+      (AGENTS.md hard rule 5).
+    patterns:
+      - pattern-either:
+          - pattern: import $X from "$MOD"
+          - pattern: import { ... } from "$MOD"
+          - pattern: import * as $X from "$MOD"
+          - pattern: import "$MOD"
+          - pattern: export { ... } from "$MOD"
+          - pattern: export * from "$MOD"
+          - pattern: require("$MOD")
+          - pattern: import("$MOD")
+      - metavariable-regex:
+          metavariable: $MOD
+          regex: ^@mariozechner/

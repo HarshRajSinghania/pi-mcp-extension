@@ -1,0 +1,53 @@
+rules:
+  # AGENTS.md Security & OAuth: unvalidated strings never reach a shell.
+  - id: pi-mcp.no-shell
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      Unvalidated strings must never reach a shell (AGENTS.md -> Security & OAuth).
+      Do not use child_process.exec/execSync, or spawn/spawnSync/execFile/execFileSync with shell: true.
+    pattern-either:
+      - pattern: child_process.exec(...)
+      - pattern: child_process.execSync(...)
+      - pattern: exec(...)
+      - pattern: execSync(...)
+      - pattern: "child_process.spawn(..., {..., shell: true, ...})"
+      - pattern: "child_process.spawnSync(..., {..., shell: true, ...})"
+      - pattern: "child_process.execFile(..., {..., shell: true, ...})"
+      - pattern: "child_process.execFileSync(..., {..., shell: true, ...})"
+      - pattern: "spawn(..., {..., shell: true, ...})"
+      - pattern: "spawnSync(..., {..., shell: true, ...})"
+      - pattern: "execFile(..., {..., shell: true, ...})"
+      - pattern: "execFileSync(..., {..., shell: true, ...})"
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec(...)
+              - pattern: $CP.execSync(...)
+              - pattern: "$CP.spawn(..., {..., shell: true, ...})"
+              - pattern: "$CP.spawnSync(..., {..., shell: true, ...})"
+              - pattern: "$CP.execFile(..., {..., shell: true, ...})"
+              - pattern: "$CP.execFileSync(..., {..., shell: true, ...})"
+          - pattern-either:
+              - pattern-inside: |
+                  import * as $CP from "$MOD";
+                  ...
+              - pattern-inside: |
+                  import $CP from "$MOD";
+                  ...
+              - pattern-inside: |
+                  const $CP = require("$MOD");
+                  ...
+          - metavariable-regex:
+              metavariable: $MOD
+              regex: ^(node:)?child_process$
+      - patterns:
+          - pattern-either:
+              - pattern: require($MOD).exec(...)
+              - pattern: require($MOD).execSync(...)
+              - pattern: "require($MOD).spawn(..., {..., shell: true, ...})"
+              - pattern: "require($MOD).spawnSync(..., {..., shell: true, ...})"
+              - pattern: "require($MOD).execFile(..., {..., shell: true, ...})"
+              - pattern: "require($MOD).execFileSync(..., {..., shell: true, ...})"
+          - metavariable-regex:
+              metavariable: $MOD
+              regex: ^["'](node:)?child_process["']$
