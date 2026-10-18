@@ -10,6 +10,7 @@ Instructions for AI coding agents (Pi, Claude Code, OpenCode, Codex, Cursor, Ant
 npm run lint                                         # eslint . (type-aware flat config)
 npm run typecheck                                    # tsc --noEmit (strict, exactOptionalPropertyTypes, noUncheckedIndexedAccess, unused/return/override/fallthrough)
 npm test                                             # all suites: node --import tsx/esm --test ./tests/*.test.ts
+npm run test:coverage                                # all suites with coverage floor (95% lines / 85% branches / 83% functions)
 node --import tsx/esm --test tests/config.test.ts    # one suite
 node --import tsx/esm --test --test-name-pattern="collision" tests/tool-bridge.test.ts   # matching tests
 npm pack --dry-run                                   # tarball must contain only src/, README.md, LICENSE, package.json
