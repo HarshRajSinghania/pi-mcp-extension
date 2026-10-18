@@ -121,7 +121,7 @@ Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. 
 - **Regular PRs are squash-merged**, so **the PR title becomes the commit that decides the release**.
 - **Stacked PRs are the exception**: their commits can land on `main` individually, so every commit subject in a stack must be a correct Conventional Commit.
 
-`.github/workflows/publish.yml` runs on every push to `main`, scans **all commit subjects since the last tag**, and publishes automatically:
+`.github/workflows/publish.yml` runs on every push to `main`. Its `verify` job repeats the CI checks on Node 22 and 24 with a read-only token; only then does the `release` job (the only job with `contents: write` / `id-token: write`, in the `npm-publish` environment) scan **all commit subjects since the last tag** and publish automatically:
 
 | Prefix | Release |
 |---|---|
@@ -133,3 +133,5 @@ Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. 
 - For `feat` / `fix` / `perf` / breaking changes, add a user-facing entry under `## [Unreleased]` in `CHANGELOG.md`. The workflow stamps the version and date.
 - Because the scan covers everything since the last tag, a `docs:` push still publishes if unreleased `fix:` / `feat:` commits are already on `main`.
 - The bot creates the `chore: release vX.Y.Z` commit and the tag. Don't create them by hand.
+- Releases never overlap (`concurrency: publish`) and are never cancelled mid-flight. The release job doesn't run `npm ci`, so no install script runs with the write token.
+- Maintainers can rehearse a release with `gh workflow run publish.yml -f dry_run=true`: it runs `npm publish --dry-run` and never commits, tags, or pushes (with no release-worthy commits it rehearses a patch). A real manual release (`dry_run=false`) is only allowed from `main`.
