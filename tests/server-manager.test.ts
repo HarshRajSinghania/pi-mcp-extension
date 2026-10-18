@@ -62,7 +62,7 @@ describe("ServerManager integration (stdio)", () => {
     const config = makeMockConfig();
     manager = new ServerManager(config);
     mockPi = makeMockPi();
-    bridge = new ToolBridge(config.settings, mockPi as any);
+    bridge = new ToolBridge(config.settings, mockPi);
     manager.setToolRefreshCallback(async (name, client) => {
       await bridge.refreshTools(name, client);
     });
@@ -211,7 +211,7 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
     });
     const manager = new ServerManager(config);
     const mockPi = makeMockPi();
-    const bridge = new ToolBridge(config.settings, mockPi as any);
+    const bridge = new ToolBridge(config.settings, mockPi);
 
     let capturedCallbackOptions: { requestTimeoutMs?: number | undefined; signal?: AbortSignal | undefined } | undefined;
     // Test 2-arg forwarding via WeakMap default options even when options is not explicitly passed to bridge.refreshTools
@@ -403,7 +403,7 @@ await server.connect(new StdioServerTransport());
     };
     const manager = new ServerManager(config);
     const mockPi = makeMockPi();
-    const bridge = new ToolBridge(config.settings, mockPi as any);
+    const bridge = new ToolBridge(config.settings, mockPi);
     manager.setToolRefreshCallback(async (name, client, opts) => {
       await bridge.refreshTools(name, client, opts);
     });
@@ -526,7 +526,7 @@ await server.connect(new StdioServerTransport());
       },
     });
     const mockPi = makeMockPi();
-    const bridge = new ToolBridge({ toolPrefix: "mcp", requestTimeoutMs: 5000, maxRetries: 0 }, mockPi as any);
+    const bridge = new ToolBridge({ toolPrefix: "mcp", requestTimeoutMs: 5000, maxRetries: 0 }, mockPi);
     manager.setToolRefreshCallback(async (name, client, opts) => {
       await bridge.refreshTools(name, client, opts);
     });
@@ -673,7 +673,7 @@ await server.connect(new StdioServerTransport());
       };
       const manager = new ServerManager(config);
       const mockPi = makeMockPi();
-      const bridge = new ToolBridge(config.settings, mockPi as any);
+      const bridge = new ToolBridge(config.settings, mockPi);
       manager.setToolRefreshCallback(async (name, client, opts) => {
         await bridge.refreshTools(name, client, opts);
       });

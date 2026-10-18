@@ -624,7 +624,7 @@ describe("ToolBridge", () => {
       maxRetries: 5,
     };
 
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
     // Tools should be registered
@@ -653,7 +653,7 @@ describe("ToolBridge", () => {
     };
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
 
     // Simulate already-registered tools
     const serverTools = new Set(["mcp_myserver_echo", "mcp_myserver_count"]);
@@ -690,7 +690,7 @@ describe("ToolBridge", () => {
     } as any;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
 
     await bridge.refreshTools("myserver", mockClient);
     await bridge.refreshTools("myserver", mockClient); // re-register with same client
@@ -725,7 +725,7 @@ describe("ToolBridge", () => {
     } as any;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
     const tool = registeredTools[0];
@@ -765,7 +765,7 @@ describe("ToolBridge", () => {
     } as any;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
     const tool = registeredTools[0];
@@ -818,7 +818,7 @@ describe("ToolBridge", () => {
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
 
     // Intra-server collision: "my-tool" and "my_tool" on server "alpha"
     const clientAlpha = {
@@ -874,7 +874,7 @@ describe("ToolBridge", () => {
       setActiveTools: (names: string[]) => { activeTools = names; },
     };
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
 
     let resolveSlow!: (val: any) => void;
     const slowClient = {
@@ -948,7 +948,7 @@ describe("ToolBridge", () => {
     } as any;
 
     const settings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 };
-    const bridge = new ToolBridge(settings, mockPi as any);
+    const bridge = new ToolBridge(settings, mockPi);
     await bridge.refreshTools("myserver", mockClient);
 
     const tool = registeredTools[0];

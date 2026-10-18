@@ -391,7 +391,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
             resolve();
           }
         },
-        (err) => {
+        (err: unknown) => {
           signal.removeEventListener("abort", onAbort);
           reject(err);
         },
@@ -513,7 +513,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
                   promptController.signal.removeEventListener("abort", onAbort);
                   resolve(value);
                 },
-                (err) => {
+                (err: unknown) => {
                   promptController.signal.removeEventListener("abort", onAbort);
                   if (promptController.signal.aborted) resolve(undefined);
                   else reject(err);
@@ -999,7 +999,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
           if (signal.aborted) {
             throw new AuthCancelledError(serverName);
           }
-          console.warn(
+          console.error(
             `[pi-mcp] Failed to discover OAuth challenge for "${serverName}"; falling back to standard discovery`,
           );
           return {};

@@ -384,7 +384,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
           token_endpoint_auth_method: info.token_endpoint_auth_method,
         }),
         ...(info.redirect_uris !== undefined && { redirect_uris: info.redirect_uris }),
-      } as OAuthClientInformationMixed;
+      };
     }
     if (this.silent) throw new AuthRequiredError(this.serverName);
     return undefined;

@@ -110,7 +110,7 @@ function extractSchemaOptions(schema: Record<string, unknown>): Record<string, u
 
 function withSchemaOptions(schema: TSchema, opts: Record<string, unknown>): TSchema {
   if (Object.keys(opts).length === 0) return schema;
-  const clone = Object.defineProperties({}, Object.getOwnPropertyDescriptors(schema)) as TSchema;
+  const clone = Object.defineProperties<TSchema>({}, Object.getOwnPropertyDescriptors(schema));
   return Object.assign(clone, opts);
 }
 
@@ -566,6 +566,7 @@ export function convertJsonSchemaToTypebox(
       // rather than `Type.Record` (`patternProperties`), which Gemini and OpenAI reject.
       return Type.Object(props, objOpts);
     }
+    case undefined:
     default:
       return Type.Any(opts);
   }
@@ -678,7 +679,7 @@ export async function listAllTools(
       throw new AuthCancelledError(serverName);
     }
     if (pageCount >= MAX_PAGES) {
-      console.warn(
+      console.error(
         `[pi-mcp] tools/list pagination exceeded ${MAX_PAGES} pages, stopping. The server may be malfunctioning.`,
       );
       break;
