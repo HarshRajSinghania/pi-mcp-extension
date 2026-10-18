@@ -43,6 +43,14 @@ jobs:
         # Checks registry signatures and provenance attestations of every installed package.
         run: npm audit signatures
 
+      - name: Audit production dependencies
+        # WHY: Node 22 leg only to avoid redundant checks across matrix runs.
+        # WHY: --omit=dev audits only runtime/production dependencies that ship to users.
+        # Dev dependencies are covered separately by Dependabot alerts and dependency review.
+        # Note: npm audit --omit=dev still inspects installed peerDependencies (required for tests).
+        if: matrix.node-version == 22
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint
         run: npm run lint
 
