@@ -1,0 +1,106 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read # WHY: default workflow-level read access
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # WHY: read repo metadata
+      pull-requests: read # WHY: gh api inspects changed files to verify CHANGELOG.md
+    steps:
+      - name: Validate PR title and changelog entry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          CR=$'\r'
+          LF=$'\n'
+
+          # Escape untrusted data before interpolation into GitHub Actions workflow commands
+          # to prevent command-injection / formatting alteration.
+          escape_data() {
+            local data="${1:-}"
+            data="${data//%/%25}"
+            data="${data//$CR/%0D}"
+            data="${data//$LF/%0A}"
+            printf '%s' "$data"
+          }
+
+          # Conventional Commit regex per AGENTS.md and stack spec:
+          # Types: feat|fix|perf|refactor|docs|test|chore|ci|build|style|revert
+          # Scope: optional, enclosed in parentheses with [a-z0-9,./-]+
+          # Breaking marker: optional '!'
+          # Description: starts with a non-space character ([^ ].*$)
+          re='^(feat|fix|perf|refactor|docs|test|chore|ci|build|style|revert)(\([a-z0-9,./-]+\))?(!?): [^ ].*$'
+
+          if [[ ! "$TITLE" =~ $re ]]; then
+            ESCAPED_TITLE="$(escape_data "$TITLE")"
+            printf "::error::PR title '%s' does not follow Conventional Commits format (e.g. 'feat: description', 'fix(scope): description', or 'feat!: description'). See AGENTS.md → Commits & release for rules.\n" "$ESCAPED_TITLE"
+            exit 1
+          fi
+
+          TYPE="${BASH_REMATCH[1]}"
+          BREAKING="${BASH_REMATCH[3]}"
+
+          # Check if the PR body contains a BREAKING CHANGE indicator.
+          # In this repo, squash merges use PR_BODY as commit body, and publish.yml checks:
+          # echo "$BODIES" | grep -qE "^BREAKING[ -]CHANGE:"
+          # We use a here-string without pipeline to avoid SIGPIPE/pipefail false negatives on large bodies,
+          # and strip carriage returns ($CR) to handle CRLF line endings from the GitHub web UI.
+          BODY_HAS_BREAKING=false
+          if grep -Eq '^BREAKING[ -]CHANGE:' <<<"${BODY//$CR/}"; then
+            BODY_HAS_BREAKING=true
+          fi
+
+          # Classify release bump level to mirror .github/workflows/publish.yml:
+          # - Breaking change ('!' marker or body BREAKING CHANGE): major release
+          # - feat: minor release
+          # - fix or perf: patch release
+          # - all others (refactor, docs, test, chore, ci, build, style, revert): no release
+          if [[ -n "$BREAKING" || "$BODY_HAS_BREAKING" == "true" ]]; then
+            BUMP="major"
+          elif [[ "$TYPE" == "feat" ]]; then
+            BUMP="minor"
+          elif [[ "$TYPE" == "fix" || "$TYPE" == "perf" ]]; then
+            BUMP="patch"
+          else
+            BUMP="none"
+          fi
+
+          printf '::notice::PR title will trigger release: %s\n' "$BUMP"
+
+          # If the body contains a breaking change line but the title has no '!', fail:
+          # the squash commit would trigger a major release while the title misrepresents it.
+          if [[ "$BODY_HAS_BREAKING" == "true" && -z "$BREAKING" ]]; then
+            ESCAPED_TITLE="$(escape_data "$TITLE")"
+            printf "::error::PR body contains a 'BREAKING CHANGE:' or 'BREAKING-CHANGE:' line which would trigger a major release per publish.yml, but PR title '%s' lacks the '!' breaking marker. Either add '!' to the title (e.g. '%s!:' or '%s(scope)!:') and update CHANGELOG.md, or reword the line in the PR description if no breaking change is intended (see AGENTS.md → Commits & release).\n" "$ESCAPED_TITLE" "$TYPE" "$TYPE"
+            exit 1
+          fi
+
+          # Releases (major, minor, patch) require a user-facing entry in CHANGELOG.md under ## [Unreleased]
+          if [[ "$BUMP" != "none" ]]; then
+            # Query pull request files via the paginated REST API instead of `gh pr diff`
+            # to avoid HTTP 406 diff limits on large PRs (>300 files / >20k lines).
+            CHANGED_FILES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')
+            if ! grep -Fxq 'CHANGELOG.md' <<<"$CHANGED_FILES"; then
+              printf "::error::PR triggers a '%s' release (%s%s), but CHANGELOG.md is not among the changed files. Please add an entry under '## [Unreleased]' in CHANGELOG.md (see AGENTS.md → Commits & release).\n" "$BUMP" "$TYPE" "${BREAKING:+!}"
+              exit 1
+            fi
+          fi
