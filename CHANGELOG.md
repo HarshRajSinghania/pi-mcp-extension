@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.9.9] - 2026-10-18
+
 ### Security
 - Sanitize server-controlled text (`notifications/message` payloads, error messages, and status summaries) with `sanitizeTerminalText` to strip ANSI/OSC/DCS/C0/C1 escape sequences, collapse line breaks, and bound length before writing to `stderr`, log buffers, or `ctx.ui.notify(...)` (#66).
 
