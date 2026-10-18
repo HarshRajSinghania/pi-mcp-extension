@@ -2637,7 +2637,566 @@ describe("OAuth Security Fixes", () => {
       }
     });
   });
+
+  describe("GHSA-6qxp-vccf-f47h: SDK authorization-server issuer binding", () => {
+    it("should persist issuer to disk and return it from tokens() across fresh provider instances", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-tokens-"));
+      const authDir = dir;
+      try {
+        const p1 = new McpOAuthProvider("srv-tokens", {}, undefined, authDir);
+        await p1.saveTokens({
+          access_token: "at-123",
+          token_type: "Bearer",
+          refresh_token: "rt-123",
+          expires_in: 3600,
+          scope: "mcp:tools",
+          issuer: "https://auth.example.com",
+        });
+
+        // 1. Verify JSON file on disk has issuer property
+        const hash = createHash("sha256").update("srv-tokens").digest("hex").slice(0, 16);
+        const raw = await readFile(join(authDir, `${hash}.json`), "utf8");
+        const parsed = JSON.parse(raw);
+        assert.strictEqual(parsed.tokens?.issuer, "https://auth.example.com");
+
+        // 2. Fresh provider instance loading from disk returns issuer
+        const p2 = new McpOAuthProvider("srv-tokens", {}, undefined, authDir);
+        const loadedTokens = await p2.tokens();
+        assert.ok(loadedTokens);
+        assert.strictEqual(loadedTokens?.access_token, "at-123");
+        assert.strictEqual(loadedTokens?.issuer, "https://auth.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should persist issuer to disk and return it from clientInformation() across fresh provider instances preserving DCR metadata", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-client-"));
+      const authDir = dir;
+      try {
+        const p1 = new McpOAuthProvider("srv-client", {}, undefined, authDir);
+        await p1.saveClientInformation({
+          client_id: "cid-456",
+          client_secret: "sec-456",
+          client_id_issued_at: 1700000000,
+          client_secret_expires_at: 0,
+          token_endpoint_auth_method: "client_secret_post",
+          redirect_uris: ["http://127.0.0.1:19876/callback"],
+          issuer: "https://auth.example.com",
+        });
+
+        // 1. Verify JSON file on disk has issuer property and DCR metadata
+        const hash = createHash("sha256").update("srv-client").digest("hex").slice(0, 16);
+        const raw = await readFile(join(authDir, `${hash}.json`), "utf8");
+        const parsed = JSON.parse(raw);
+        assert.strictEqual(parsed.clientInfo?.issuer, "https://auth.example.com");
+        assert.strictEqual(parsed.clientInfo?.token_endpoint_auth_method, "client_secret_post");
+        assert.deepStrictEqual(parsed.clientInfo?.redirect_uris, ["http://127.0.0.1:19876/callback"]);
+
+        // 2. Fresh provider instance loading from disk returns issuer and DCR metadata
+        const p2 = new McpOAuthProvider("srv-client", {}, undefined, authDir);
+        const loadedClient = await p2.clientInformation();
+        assert.ok(loadedClient);
+        assert.strictEqual(loadedClient?.client_id, "cid-456");
+        assert.strictEqual(loadedClient?.client_secret, "sec-456");
+        assert.strictEqual(loadedClient?.issuer, "https://auth.example.com");
+        if (loadedClient && "token_endpoint_auth_method" in loadedClient) {
+          assert.strictEqual(loadedClient.token_endpoint_auth_method, "client_secret_post");
+        } else {
+          assert.fail("token_endpoint_auth_method should be present");
+        }
+        if (loadedClient && "redirect_uris" in loadedClient) {
+          assert.deepStrictEqual(loadedClient.redirect_uris, ["http://127.0.0.1:19876/callback"]);
+        } else {
+          assert.fail("redirect_uris should be present");
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should allow pre-upgrade unstamped credentials without issuer and preserve them gracefully", async () => {
+      const { writeFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-legacy-"));
+      const authDir = dir;
+      try {
+        const hash = createHash("sha256").update("legacy-srv").digest("hex").slice(0, 16);
+        await writeFile(
+          join(authDir, `${hash}.json`),
+          JSON.stringify({
+            clientInfo: {
+              client_id: "legacy-cid",
+              client_secret: "legacy-sec",
+            },
+            tokens: {
+              access_token: "legacy-at",
+              refresh_token: "legacy-rt",
+              token_type: "Bearer",
+            },
+          }),
+          "utf8",
+        );
+
+        const provider = new McpOAuthProvider("legacy-srv", {}, undefined, authDir);
+        const tokens = await provider.tokens();
+        assert.ok(tokens);
+        assert.strictEqual(tokens?.access_token, "legacy-at");
+        assert.strictEqual(tokens?.issuer, undefined);
+
+        const client = await provider.clientInformation();
+        assert.ok(client);
+        assert.strictEqual(client?.client_id, "legacy-cid");
+        assert.strictEqual(client?.issuer, undefined);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should discard stored tokens when the authorization server issuer mismatches (SDK discardIfIssuerMismatch integration)", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-mismatch-"));
+      const authDir = dir;
+      try {
+        const provider = new McpOAuthProvider("mismatch-srv", {}, undefined, authDir);
+        // Stored tokens were issued by auth-one
+        await provider.saveTokens({
+          access_token: "compromised-at",
+          refresh_token: "compromised-rt",
+          token_type: "Bearer",
+          issuer: "https://auth-one.example.com",
+        });
+
+        // Use SDK's auth() with a mock server pointing to auth-two
+        const { auth } = await import("@modelcontextprotocol/sdk/client/auth.js");
+
+        let refreshRequested = false;
+        const mockFetch: typeof fetch = async (url, init) => {
+          const u = String(url);
+          if (u.includes("/.well-known/oauth-protected-resource")) {
+            return new Response(JSON.stringify({
+              resource: "https://mcp.example.com/srv",
+              authorization_servers: ["https://auth-two.example.com"],
+            }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          if (u.includes("/.well-known/oauth-authorization-server") || u.includes("/.well-known/openid-configuration")) {
+            return new Response(JSON.stringify({
+              issuer: "https://auth-two.example.com",
+              authorization_endpoint: "https://auth-two.example.com/authorize",
+              token_endpoint: "https://auth-two.example.com/token",
+              registration_endpoint: "https://auth-two.example.com/register",
+              response_types_supported: ["code"],
+            }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          if (u === "https://auth-two.example.com/token") {
+            const body = String(init?.body ?? "");
+            if (body.includes("grant_type=refresh_token")) {
+              refreshRequested = true;
+            }
+            return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+          }
+          if (u === "https://auth-two.example.com/register") {
+            return new Response(JSON.stringify({
+              client_id: "new-client-at-two",
+              client_secret: "new-secret-at-two",
+              redirect_uris: ["http://127.0.0.1:19876/callback"],
+            }), { status: 201, headers: { "content-type": "application/json" } });
+          }
+          return new Response("Not found", { status: 404 });
+        };
+
+        // When auth() runs, because the stored token has issuer auth-one, it MUST NOT
+        // post the refresh token to auth-two's token endpoint.
+        let redirectedUrl: URL | undefined;
+        const redirectProvider = new McpOAuthProvider(
+          "mismatch-srv",
+          {},
+          (url) => { redirectedUrl = url; },
+          authDir,
+        );
+
+        const result = await auth(redirectProvider, {
+          serverUrl: "https://mcp.example.com/srv",
+          fetchFn: mockFetch,
+        });
+
+        assert.strictEqual(result, "REDIRECT");
+        assert.strictEqual(refreshRequested, false, "Stored refresh token from auth-one must never be sent to auth-two");
+        assert.ok(redirectedUrl);
+        assert.strictEqual(redirectedUrl?.origin, "https://auth-two.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should preserve issuer across silent peer token refresh rotation", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-peer-"));
+      const authDir = dir;
+      try {
+        const seeder = new McpOAuthProvider("peer-srv", {}, undefined, authDir);
+        await seeder.saveTokens({
+          access_token: "initial-at",
+          refresh_token: "initial-rt",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
+
+        // Process B in silent mode reads initial tokens
+        const processB = new McpOAuthProvider("peer-srv", {}, undefined, authDir, true);
+        const tokensB1 = await processB.tokens();
+        assert.strictEqual(tokensB1?.access_token, "initial-at");
+        assert.strictEqual(tokensB1?.issuer, "https://auth.example.com");
+
+        // Process A rotates tokens on disk
+        const processA = new McpOAuthProvider("peer-srv", {}, undefined, authDir, true);
+        await processA.saveTokens({
+          access_token: "rotated-at",
+          refresh_token: "rotated-rt",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
+
+        // Process B encounters 401 and calls invalidateCredentials("tokens")
+        await processB.invalidateCredentials("tokens");
+
+        // Process B's tokens should now have rotated tokens AND retain issuer
+        const tokensB2 = await processB.tokens();
+        assert.strictEqual(tokensB2?.access_token, "rotated-at");
+        assert.strictEqual(tokensB2?.refresh_token, "rotated-rt");
+        assert.strictEqual(tokensB2?.issuer, "https://auth.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should preserve clientInfo issuer when tokens are invalidated and clear issuer when all are invalidated", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-inval-"));
+      const authDir = dir;
+      try {
+        const { invalidateStoredTokens } = await import("../src/oauth-provider.js");
+        const p = new McpOAuthProvider("inval-srv", {}, undefined, authDir);
+        await p.saveClientInformation({
+          client_id: "cid-1",
+          issuer: "https://auth.example.com",
+        });
+        await p.saveTokens({
+          access_token: "at-1",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
+
+        // Invalidate tokens only via invalidateStoredTokens
+        await invalidateStoredTokens("inval-srv", authDir);
+
+        const p2 = new McpOAuthProvider("inval-srv", {}, undefined, authDir);
+        assert.strictEqual(await p2.tokens(), undefined);
+        const clientAfterTokensInval = await p2.clientInformation();
+        assert.strictEqual(clientAfterTokensInval?.client_id, "cid-1");
+        assert.strictEqual(clientAfterTokensInval?.issuer, "https://auth.example.com");
+
+        // Now invalidate all
+        await p2.invalidateCredentials("all");
+        assert.strictEqual(await p2.tokens(), undefined);
+        assert.strictEqual(await p2.clientInformation(), undefined);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should enforce origin binding alongside authorization-server issuer binding", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-issuer-origin-"));
+      const authDir = dir;
+      try {
+        const serverUrl = "https://mcp.example.com/team-a";
+        const evilUrl = "https://mcp.example.com/team-b";
+        const p = new McpOAuthProvider("origin-srv", {}, undefined, authDir, false, () => false, undefined, serverUrl);
+        await p.saveClientInformation({
+          client_id: "cid-orig",
+          issuer: "https://auth.example.com",
+        });
+        await p.saveTokens({
+          access_token: "at-orig",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
+
+        // When loaded with matching serverUrl: returns credentials with issuer
+        const matchProvider = new McpOAuthProvider("origin-srv", {}, undefined, authDir, false, () => false, undefined, serverUrl);
+        const matchTokens = await matchProvider.tokens();
+        const matchClient = await matchProvider.clientInformation();
+        assert.strictEqual(matchTokens?.access_token, "at-orig");
+        assert.strictEqual(matchTokens?.issuer, "https://auth.example.com");
+        assert.strictEqual(matchClient?.issuer, "https://auth.example.com");
+
+        // When loaded with mismatched serverUrl: returns undefined (origin binding)
+        const evilProvider = new McpOAuthProvider("origin-srv", {}, undefined, authDir, false, () => false, undefined, evilUrl);
+        assert.strictEqual(await evilProvider.tokens(), undefined);
+        assert.strictEqual(await evilProvider.clientInformation(), undefined);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should persist both tokens.issuer and clientInfo.issuer on disk after silent refresh with legacy unstamped state", async () => {
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const { auth } = await import("@modelcontextprotocol/sdk/client/auth.js");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-silent-refresh-bind-"));
+      const authDir = dir;
+      try {
+        const hash = createHash("sha256").update("legacy-refresh-srv").digest("hex").slice(0, 16);
+        await writeFile(
+          join(authDir, `${hash}.json`),
+          JSON.stringify({
+            clientInfo: {
+              client_id: "legacy-cid",
+              client_secret: "legacy-sec",
+            },
+            tokens: {
+              access_token: "expired-at",
+              refresh_token: "valid-rt",
+              token_type: "Bearer",
+            },
+          }),
+          "utf8",
+        );
+
+        const mockFetch: typeof fetch = async (url, init) => {
+          const u = String(url);
+          if (u.includes("/.well-known/oauth-protected-resource")) {
+            return new Response(JSON.stringify({
+              resource: "https://mcp.example.com/srv",
+              authorization_servers: ["https://auth.example.com"],
+            }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          if (u.includes("/.well-known/oauth-authorization-server") || u.includes("/.well-known/openid-configuration")) {
+            return new Response(JSON.stringify({
+              issuer: "https://auth.example.com",
+              authorization_endpoint: "https://auth.example.com/authorize",
+              token_endpoint: "https://auth.example.com/token",
+              response_types_supported: ["code"],
+              grant_types_supported: ["authorization_code", "refresh_token"],
+            }), { status: 200, headers: { "content-type": "application/json" } });
+          }
+          if (u === "https://auth.example.com/token") {
+            const body = String(init?.body ?? "");
+            if (body.includes("grant_type=refresh_token")) {
+              return new Response(JSON.stringify({
+                access_token: "refreshed-at",
+                refresh_token: "refreshed-rt",
+                token_type: "Bearer",
+                expires_in: 3600,
+              }), { status: 200, headers: { "content-type": "application/json" } });
+            }
+          }
+          return new Response("Not found", { status: 404 });
+        };
+
+        const silentProvider = new McpOAuthProvider(
+          "legacy-refresh-srv",
+          {},
+          undefined,
+          authDir,
+          true,
+        );
+
+        const result = await auth(silentProvider, {
+          serverUrl: "https://mcp.example.com/srv",
+          fetchFn: mockFetch,
+        });
+
+        assert.strictEqual(result, "AUTHORIZED");
+
+        // Verify that disk state has BOTH tokens.issuer AND clientInfo.issuer persisted
+        const raw = await readFile(join(authDir, `${hash}.json`), "utf8");
+        const parsed = JSON.parse(raw);
+        assert.strictEqual(parsed.tokens?.issuer, "https://auth.example.com");
+        assert.strictEqual(parsed.clientInfo?.issuer, "https://auth.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should reject new DCR registration with different client_id in silent mode and not write to disk", async () => {
+      const { readdir } = await import("node:fs/promises");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-silent-new-dcr-"));
+      const authDir = dir;
+      try {
+        const silentProvider = new McpOAuthProvider("new-dcr-srv", {}, undefined, authDir, true);
+        await assert.rejects(
+          () => silentProvider.saveClientInformation({
+            client_id: "new-unregistered-cid",
+            issuer: "https://auth.example.com",
+          }),
+          AuthRequiredError,
+        );
+
+        // State directory should remain empty (no state file written)
+        const files = await readdir(authDir);
+        assert.deepStrictEqual(files, []);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should bind issuer on static clientId from config on first use and allow clean rebinding after reset", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const { resetAuth } = await import("../src/oauth-provider.js");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-static-bind-"));
+      const authDir = dir;
+      try {
+        const p1 = new McpOAuthProvider(
+          "static-srv",
+          { clientId: "cfg-client-id", clientSecret: "cfg-secret" },
+          undefined,
+          authDir,
+        );
+
+        // Before first save, clientInformation returns static config without issuer
+        const initialClient = await p1.clientInformation();
+        assert.strictEqual(initialClient?.client_id, "cfg-client-id");
+        assert.strictEqual(initialClient?.issuer, undefined);
+
+        // First successful use binds issuer (even if SDK passes client_secret)
+        await p1.saveClientInformation({
+          client_id: "cfg-client-id",
+          client_secret: "cfg-secret",
+          issuer: "https://auth-one.example.com",
+        });
+
+        // Config-supplied client_secret must never be persisted to the disk state file
+        const hash = createHash("sha256").update("static-srv").digest("hex").slice(0, 16);
+        const rawState = await readFile(join(authDir, `${hash}.json`), "utf8");
+        const parsedState = JSON.parse(rawState);
+        assert.strictEqual(parsedState.clientInfo?.client_id, "cfg-client-id");
+        assert.strictEqual(parsedState.clientInfo?.issuer, "https://auth-one.example.com");
+        assert.strictEqual(parsedState.clientInfo?.client_secret, undefined);
+        assert.strictEqual("client_secret" in (parsedState.clientInfo ?? {}), false);
+
+        // Silent path with static clientId must also never persist client_secret to disk
+        const silentStatic = new McpOAuthProvider(
+          "static-silent-srv",
+          { clientId: "cfg-silent-id", clientSecret: "cfg-silent-sec" },
+          undefined,
+          authDir,
+          true,
+        );
+        await silentStatic.saveClientInformation({
+          client_id: "cfg-silent-id",
+          client_secret: "cfg-silent-sec",
+          issuer: "https://auth-silent.example.com",
+        });
+        const silentHash = createHash("sha256").update("static-silent-srv").digest("hex").slice(0, 16);
+        const rawSilentState = await readFile(join(authDir, `${silentHash}.json`), "utf8");
+        const parsedSilentState = JSON.parse(rawSilentState);
+        assert.strictEqual(parsedSilentState.clientInfo?.client_id, "cfg-silent-id");
+        assert.strictEqual(parsedSilentState.clientInfo?.issuer, "https://auth-silent.example.com");
+        assert.strictEqual(parsedSilentState.clientInfo?.client_secret, undefined);
+        assert.strictEqual("client_secret" in (parsedSilentState.clientInfo ?? {}), false);
+
+        // Fresh provider returns bound issuer
+        const p2 = new McpOAuthProvider(
+          "static-srv",
+          { clientId: "cfg-client-id", clientSecret: "cfg-secret" },
+          undefined,
+          authDir,
+        );
+        const boundClient = await p2.clientInformation();
+        assert.strictEqual(boundClient?.client_id, "cfg-client-id");
+        assert.strictEqual(boundClient?.issuer, "https://auth-one.example.com");
+
+        // After /mcp:auth <server> --reset equivalent (resetAuth)
+        await resetAuth("static-srv", authDir);
+
+        const p3 = new McpOAuthProvider(
+          "static-srv",
+          { clientId: "cfg-client-id", clientSecret: "cfg-secret" },
+          undefined,
+          authDir,
+        );
+        const resetClient = await p3.clientInformation();
+        assert.strictEqual(resetClient?.client_id, "cfg-client-id");
+        assert.strictEqual(resetClient?.issuer, undefined);
+
+        // A different authorization server can now bind cleanly
+        await p3.saveClientInformation({
+          client_id: "cfg-client-id",
+          issuer: "https://auth-two.example.com",
+        });
+        const reboundClient = await p3.clientInformation();
+        assert.strictEqual(reboundClient?.client_id, "cfg-client-id");
+        assert.strictEqual(reboundClient?.issuer, "https://auth-two.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should never re-stamp an already stamped client with a different issuer", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { createHash } = await import("node:crypto");
+      const { McpError } = await import("../src/errors.js");
+      const dir = await mkdtemp(join(tmpdir(), "pi-mcp-no-restamp-"));
+      const authDir = dir;
+      try {
+        const p = new McpOAuthProvider("stamped-srv", {}, undefined, authDir);
+        await p.saveClientInformation({
+          client_id: "cid-fixed",
+          issuer: "https://auth-one.example.com",
+        });
+
+        // Attempting to save with a different issuer must reject with McpError mentioning --reset
+        await assert.rejects(
+          () =>
+            p.saveClientInformation({
+              client_id: "cid-fixed",
+              issuer: "https://auth-two.example.com",
+            }),
+          (err: unknown) => {
+            assert.ok(err instanceof McpError);
+            assert.strictEqual(err.code, "auth");
+            assert.match(err.message, /\/mcp:auth stamped-srv --reset/);
+            return true;
+          },
+        );
+
+        const client1 = await p.clientInformation();
+        assert.strictEqual(client1?.issuer, "https://auth-one.example.com");
+
+        // Same invariant in silent mode: must reject with McpError and not re-stamp with different issuer
+        const silentP = new McpOAuthProvider("stamped-srv", {}, undefined, authDir, true);
+        await assert.rejects(
+          () =>
+            silentP.saveClientInformation({
+              client_id: "cid-fixed",
+              issuer: "https://auth-two.example.com",
+            }),
+          (err: unknown) => {
+            assert.ok(err instanceof McpError);
+            assert.strictEqual(err.code, "auth");
+            assert.match(err.message, /\/mcp:auth stamped-srv --reset/);
+            return true;
+          },
+        );
+
+        const client2 = await silentP.clientInformation();
+        assert.strictEqual(client2?.issuer, "https://auth-one.example.com");
+
+        // Direct disk assertion: disk state retains original issuer in both cases
+        const hash = createHash("sha256").update("stamped-srv").digest("hex").slice(0, 16);
+        const raw = await readFile(join(authDir, `${hash}.json`), "utf8");
+        const parsed = JSON.parse(raw);
+        assert.strictEqual(parsed.clientInfo?.issuer, "https://auth-one.example.com");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
+
 
 
 

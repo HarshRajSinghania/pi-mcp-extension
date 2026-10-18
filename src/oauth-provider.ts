@@ -114,6 +114,7 @@ interface StoredClientInfo {
   client_secret_expires_at: number | undefined;
   token_endpoint_auth_method: string | undefined;
   redirect_uris: string[] | undefined;
+  issuer: string | undefined;
 }
 
 interface StoredTokens {
@@ -124,6 +125,7 @@ interface StoredTokens {
   scope: string | undefined;
   /** ISO timestamp when tokens were saved (for expiry estimation). */
   saved_at: string | undefined;
+  issuer: string | undefined;
 }
 
 interface StoredState {
@@ -133,6 +135,11 @@ interface StoredState {
   discoveryState: OAuthDiscoveryState | undefined;
 }
 
+// WHY: Credentials persisted before SDK 1.31 (GHSA-6qxp-vccf-f47h) have no `issuer`
+// property. We allow `issuer: z.string().optional()` so legacy state loads gracefully;
+// the SDK binds them to the discovered authorization server on first successful use.
+// Unknown keys are stripped by z.object, so explicit schema inclusion is required to
+// persist and return the SDK's issuer stamp.
 const StoredClientInfoSchema = z.object({
   client_id: z.string(),
   client_secret: z.string().optional(),
@@ -140,6 +147,7 @@ const StoredClientInfoSchema = z.object({
   client_secret_expires_at: z.number().optional(),
   token_endpoint_auth_method: z.string().optional(),
   redirect_uris: z.array(z.string()).optional(),
+  issuer: z.string().optional(),
 });
 
 const StoredTokensSchema = z.object({
@@ -149,6 +157,7 @@ const StoredTokensSchema = z.object({
   expires_in: z.number().optional(),
   scope: z.string().optional(),
   saved_at: z.string().optional(),
+  issuer: z.string().optional(),
 });
 
 export const StoredStateSchema = z.object({
@@ -237,6 +246,7 @@ async function loadState(
           client_secret_expires_at: parsed.clientInfo.client_secret_expires_at,
           token_endpoint_auth_method: parsed.clientInfo.token_endpoint_auth_method,
           redirect_uris: parsed.clientInfo.redirect_uris,
+          issuer: parsed.clientInfo.issuer,
         }
       : undefined,
     tokens: parsed.tokens
@@ -247,6 +257,7 @@ async function loadState(
           expires_in: parsed.tokens.expires_in,
           scope: parsed.tokens.scope,
           saved_at: parsed.tokens.saved_at,
+          issuer: parsed.tokens.issuer,
         }
       : undefined,
     discoveryState,
@@ -346,9 +357,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     // If static credentials provided, use those
     if (this.authConfig.clientId) {
+      const state = await loadState(this.serverName, this.storageDir, this.serverUrl);
+      const boundIssuer =
+        state.clientInfo?.client_id === this.authConfig.clientId ? state.clientInfo.issuer : undefined;
       return {
         client_id: this.authConfig.clientId,
         ...(this.authConfig.clientSecret && { client_secret: this.authConfig.clientSecret }),
+        ...(boundIssuer !== undefined && { issuer: boundIssuer }),
       };
     }
     // Otherwise load from persisted DCR state
@@ -390,6 +405,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
           token_endpoint_auth_method: info.token_endpoint_auth_method,
         }),
         ...(info.redirect_uris !== undefined && { redirect_uris: info.redirect_uris }),
+        ...(info.issuer !== undefined && { issuer: info.issuer }),
       };
     }
     if (this.silent) throw new AuthRequiredError(this.serverName);
@@ -399,9 +415,88 @@ export class McpOAuthProvider implements OAuthClientProvider {
   // --- saveClientInformation (DCR) ---
 
   async saveClientInformation(clientInformation: OAuthClientInformationMixed): Promise<void> {
-    if (this.silent) throw new AuthRequiredError(this.serverName);
+    const issuerToBind =
+      typeof clientInformation.issuer === "string" ? clientInformation.issuer : undefined;
+
+    if (this.silent) {
+      const knownClientId = this.authConfig.clientId;
+      let handle: AuthLockHandle | undefined;
+      try {
+        handle = await acquireAuthLock(this.serverName, this.storageDir);
+        const state = await loadState(this.serverName, this.storageDir, this.serverUrl);
+        const storedClient = state.clientInfo;
+        const matchingId = knownClientId ?? storedClient?.client_id;
+        if (!matchingId || clientInformation.client_id !== matchingId) {
+          // WHY: Silent background connections must never execute Dynamic Client Registration
+          // for a new or different client_id without interactive user consent.
+          throw new AuthRequiredError(this.serverName);
+        }
+        if (storedClient?.issuer !== undefined && issuerToBind !== undefined && storedClient.issuer !== issuerToBind) {
+          // WHY: A stored client already bound to an authorization server issuer must never be
+          // re-bound to a different issuer. Switching authorization servers requires an explicit reset.
+          throw new McpError(
+            `OAuth client for "${this.serverName}" is already bound to authorization server ${storedClient.issuer} and cannot be bound to ${issuerToBind}. Run /mcp:auth ${this.serverName} --reset to re-authorize.`,
+            this.serverName,
+            "auth",
+          );
+        }
+        if (this.serverUrl) {
+          state.serverUrl = canonicalServerUrl(this.serverUrl);
+        }
+        if (storedClient) {
+          // WHY: Mirror silent saveTokens: pure issuer binding of the already-known client
+          // preserves all stored credentials and DCR metadata on disk while stamping issuer.
+          if (this.authConfig.clientId) {
+            storedClient.client_secret = undefined;
+          }
+          storedClient.issuer = issuerToBind ?? storedClient.issuer;
+        } else {
+          state.clientInfo = {
+            client_id: clientInformation.client_id,
+            client_secret: this.authConfig.clientId
+              ? undefined
+              : (this.authConfig.clientSecret ?? clientInformation.client_secret),
+            client_id_issued_at: undefined,
+            client_secret_expires_at: undefined,
+            token_endpoint_auth_method: undefined,
+            redirect_uris: undefined,
+            issuer: issuerToBind,
+          };
+        }
+        await saveState(this.serverName, state, this.storageDir, this.isCancelled);
+      } catch (err) {
+        if (err instanceof AuthRequiredError || err instanceof McpError) {
+          throw err;
+        }
+        // WHY: When another process holds the interactive auth lock (e.g. during an interactive
+        // /mcp:auth or --reset), acquireAuthLock fails fast. We skip this background binding
+        // without failing the refresh — the SDK will bind client information again on the next refresh.
+        if (!(err instanceof AuthLockError)) {
+          console.error(`[pi-mcp] Failed to persist OAuth client info for "${this.serverName}":`, err);
+        }
+      } finally {
+        await handle?.();
+      }
+      return;
+    }
+
+    if (this.isCancelled()) throw new AuthRequiredError(this.serverName, "Authorization cancelled");
     await this.assertLockHeld?.();
     const state = await loadState(this.serverName, this.storageDir, this.serverUrl);
+    if (
+      state.clientInfo?.client_id === clientInformation.client_id &&
+      state.clientInfo.issuer !== undefined &&
+      issuerToBind !== undefined &&
+      state.clientInfo.issuer !== issuerToBind
+    ) {
+      // WHY: A stamped client is never re-stamped with a different authorization server issuer.
+      // To switch authorization servers, credentials must be explicitly reset via /mcp:auth <server> --reset.
+      throw new McpError(
+        `OAuth client for "${this.serverName}" is already bound to authorization server ${state.clientInfo.issuer} and cannot be bound to ${issuerToBind}. Run /mcp:auth ${this.serverName} --reset to re-authorize.`,
+        this.serverName,
+        "auth",
+      );
+    }
     if (this.serverUrl) {
       state.serverUrl = canonicalServerUrl(this.serverUrl);
     }
@@ -413,18 +508,28 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }>;
     state.clientInfo = {
       client_id: clientInformation.client_id,
-      client_secret: clientInformation.client_secret,
-      client_id_issued_at:
-        typeof fullInfo.client_id_issued_at === "number" ? fullInfo.client_id_issued_at : undefined,
-      client_secret_expires_at:
-        typeof fullInfo.client_secret_expires_at === "number" ? fullInfo.client_secret_expires_at : undefined,
-      token_endpoint_auth_method:
-        typeof fullInfo.token_endpoint_auth_method === "string"
+      client_secret: this.authConfig.clientId ? undefined : clientInformation.client_secret,
+      client_id_issued_at: this.authConfig.clientId
+        ? undefined
+        : typeof fullInfo.client_id_issued_at === "number"
+          ? fullInfo.client_id_issued_at
+          : undefined,
+      client_secret_expires_at: this.authConfig.clientId
+        ? undefined
+        : typeof fullInfo.client_secret_expires_at === "number"
+          ? fullInfo.client_secret_expires_at
+          : undefined,
+      token_endpoint_auth_method: this.authConfig.clientId
+        ? undefined
+        : typeof fullInfo.token_endpoint_auth_method === "string"
           ? fullInfo.token_endpoint_auth_method
           : undefined,
-      redirect_uris: Array.isArray(fullInfo.redirect_uris)
-        ? fullInfo.redirect_uris.map((u) => String(u))
-        : undefined,
+      redirect_uris: this.authConfig.clientId
+        ? undefined
+        : Array.isArray(fullInfo.redirect_uris)
+          ? fullInfo.redirect_uris.map((u) => String(u))
+          : undefined,
+      issuer: issuerToBind,
     };
     await this.assertLockHeld?.();
     await saveState(this.serverName, state, this.storageDir, this.isCancelled);
@@ -460,6 +565,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (storedTokens.refresh_token !== undefined) tokens.refresh_token = storedTokens.refresh_token;
     if (storedTokens.expires_in !== undefined) tokens.expires_in = storedTokens.expires_in;
     if (storedTokens.scope !== undefined) tokens.scope = storedTokens.scope;
+    if (storedTokens.issuer !== undefined) tokens.issuer = storedTokens.issuer;
     return tokens as unknown as OAuthTokens;
   }
 
@@ -473,6 +579,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       expires_in: tokens.expires_in,
       scope: tokens.scope,
       saved_at: new Date().toISOString(),
+      issuer: typeof tokens.issuer === "string" ? tokens.issuer : undefined,
     };
 
     if (this.silent) {
