@@ -100,6 +100,20 @@ Self-review before finishing:
 - Is external input Zod-validated and are URLs scheme-checked?
 - Are credentials origin-bound and written `0o600`?
 
+## CI
+
+Workflows live in `.github/workflows/`. The checks below run on every PR, whatever its base branch (so each PR in a stack is checked too), and on every push to `main`.
+
+| Workflow | Job | What it enforces |
+|---|---|---|
+| `ci.yml` | `check` (Node 22, 24) | `npm audit signatures`, lint, typecheck, tests (coverage floor on Node 22), `npm pack --dry-run` |
+
+When you edit a workflow:
+
+- Pin every `uses:` to a full 40-character commit SHA with a `# vX.Y.Z` comment. Never use a tag or branch.
+- Grant least privilege: `permissions: contents: read` (or `{}`) at the workflow level, widened per job only where a step needs it.
+- Check out with `persist-credentials: false`, and give every job a `timeout-minutes`.
+
 ## Commits & release
 
 Work on a branch and open a PR. Use Conventional Commits; scopes are fine (e.g. `fix(oauth): ...`).
