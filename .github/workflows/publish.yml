@@ -100,13 +100,37 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
+          # WHY: Node 24 LTS bundles npm >= 11.6.1, covering the npm >= 11.5.1 needed for Trusted Publishing
+          # without an unpinned global npm install (satisfies OpenSSF Scorecard Pinned-Dependencies check).
+          # The verify job already tests Node 24.
           # WHY: do not use cache: npm here. Avoid cache poisoning in a release workflow.
 
-      - name: Upgrade npm (required for OIDC Trusted Publishing)
-        # zizmor: ignore[adhoc-packages]
-        # WHY: exact pin per spec; npm 11.21.1 supports OIDC Trusted Publishing with provenance.
-        run: npm install -g npm@11.21.1
+      - name: Verify npm version supports OIDC Trusted Publishing
+        run: |
+          # WHY: OIDC Trusted Publishing requires npm >= 11.5.1 (see https://docs.npmjs.com/trusted-publishers/).
+          # Node 24 bundles npm >= 11.6.1; this step fails closed if the runner's bundled npm is insufficient.
+          MIN_NPM_VERSION="11.5.1"
+          ACTUAL_NPM_VERSION=$(npm --version)
+          # Dependency-free semver compare that fails before any mutating step.
+          if ! node -e '
+            const [actual, min] = [process.argv[1], process.argv[2]];
+            const parse = (v) => {
+              const [core, ...pre] = (v || "").trim().replace(/^v/, "").split("-");
+              const [maj = 0, min = 0, pat = 0] = core.split(".").map(Number);
+              return { maj, min, pat, pre: pre.join("-") };
+            };
+            const a = parse(actual);
+            const m = parse(min);
+            const cmp = (a.maj - m.maj) || (a.min - m.min) || (a.pat - m.pat);
+            if (cmp < 0 || (cmp === 0 && a.pre && !m.pre)) {
+              process.exit(1);
+            }
+          ' "$ACTUAL_NPM_VERSION" "$MIN_NPM_VERSION"; then
+            echo "::error::Bundled npm version ${ACTUAL_NPM_VERSION} does not meet the minimum required version ${MIN_NPM_VERSION} for npm OIDC Trusted Publishing (see https://docs.npmjs.com/trusted-publishers/)."
+            exit 1
+          fi
+          echo "Verified npm version: ${ACTUAL_NPM_VERSION} (meets minimum ${MIN_NPM_VERSION} for OIDC Trusted Publishing)"
 
       - name: Determine version bump
         id: bump
