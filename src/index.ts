@@ -31,10 +31,7 @@ import { spawn } from "node:child_process";
 
 // OAuth imports
 import {
-  ensureCallbackServer,
-  waitForCallback,
-  cancelCallback,
-  stopCallbackServer,
+  CallbackServer,
   callbackServerConfigFromRedirectUrl,
 } from "./callback-server.js";
 import { CallbackUrlValidationError, isSafeAuthorizationUrl, parseCallbackUrl } from "./callback-url.js";
@@ -247,7 +244,7 @@ export async function waitForOAuthCallback(
 
 const DEFAULT_SETTINGS = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 } as const;
 
-export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void> } = {}): Promise<void> {
+export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void>; callbackServer?: CallbackServer } = {}): Promise<void> {
   // ── 1. Load and validate config ──────────────────────────────────────────
   // cwd and project trust are available on the ExtensionContext passed to event handlers.
   // At bootstrap (before session_start) we load ONLY the global config so untrusted
@@ -281,6 +278,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
   // ── 2. Initialize bridge components ──────────────────────────────────────
   const manager = new ServerManager(config, paths.authStorageDir);
   const bridge = new ToolBridge(config.settings, pi);
+  const callbackServer = paths.callbackServer ?? new CallbackServer();
   const connectAttempts = new Map<string, { promise: Promise<void>; controller: AbortController; reset: boolean; waiters: number }>();
   const declinedStartupAuth = new Set<string>();
   const startupPromptControllers = new Map<string, AbortController>();
@@ -369,7 +367,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     if (inFlightPromises.length > 0) {
       await Promise.allSettled(inFlightPromises);
     }
-    await stopCallbackServer().catch(() => {
+    await callbackServer.stop().catch(() => {
       // WHY: Ignore callback server shutdown errors during session teardown.
     });
     for (const server of manager.getAllServers()) {
@@ -704,7 +702,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     startupPromptControllers.clear();
     for (const attempt of connectAttempts.values()) attempt.controller.abort();
     connectAttempts.clear();
-    await stopCallbackServer().catch(() => {
+    await callbackServer.stop().catch(() => {
       // WHY: Ignore callback server shutdown errors during session_shutdown.
     });
 
@@ -808,7 +806,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     let oauthState: string | undefined;
     let latestAuthorizationUrl: URL | undefined;
     let lockLost = false;
-    const cancel = () => { if (oauthState) cancelCallback(oauthState); };
+    const cancel = () => { if (oauthState) callbackServer.cancel(oauthState); };
     signal.addEventListener("abort", cancel, { once: true });
     let unlock: AuthLockHandle | undefined;
     try {
@@ -843,7 +841,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
 
         // 1. Start the callback server
         const callbackServerConfig = callbackServerConfigFromRedirectUrl(config.auth?.redirectUrl);
-        const port = await ensureCallbackServer(callbackServerConfig.preferredPort, {
+        const port = await callbackServer.ensure(callbackServerConfig.preferredPort, {
           host: callbackServerConfig.host,
           allowPortFallback: callbackServerConfig.allowPortFallback,
         });
@@ -935,7 +933,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
         // 5. Register the callback immediately before auth() can open the browser.
         // Attach a catch handler so cancellation after immediate authorization
         // does not produce an unhandled rejection.
-        const callbackPromise = waitForCallback(oauthState);
+        const callbackPromise = callbackServer.waitForCallback(oauthState);
         callbackPromise.catch(() => {
           // WHY: Suppress unhandled rejection when callbackPromise is cancelled after immediate authorization.
         });
@@ -1061,7 +1059,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     } finally {
       signal.removeEventListener("abort", cancel);
       cancel();
-      await stopCallbackServer().catch(() => {
+      await callbackServer.stop().catch(() => {
         // WHY: Ignore callback server stop errors during authorize cleanup.
       });
       await unlock?.();
