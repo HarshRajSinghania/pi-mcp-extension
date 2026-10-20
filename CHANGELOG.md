@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-20
+
 ### Added
 - Opt-in debug log: set `PI_MCP_DEBUG=1` to record the extension's own decisions (server state transitions, retries and backoff, OAuth token refresh, cross-process auth-lock contention, 401/403 classification, session reloads) as JSON Lines in `<agent dir>/logs/pi-mcp.log`. The directory is `0o700` and the file is `0o600`, the log is rotated to `pi-mcp.log.1` at ~2 MB, and only allow-listed field names are recorded — a final pass masks anything token-like (`access_token`, `refresh_token`, `client_secret`, `code=`, `code_verifier`, `Authorization:` / `Bearer …`). Without the environment variable no log file is created (#71).
 
