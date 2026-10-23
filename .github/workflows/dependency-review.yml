@@ -4,6 +4,7 @@ on:
   # WHY: no `branches:` filter. Stacked PRs target another PR's branch,
   # not `main`, and must be checked before merging into their base.
   pull_request:
+  merge_group:
   # WHY: publish.yml dispatches this workflow onto the release branch: a PR created
   # with GITHUB_TOKEN triggers no pull_request workflows, so the release PR gets its
   # `dependency-review` check run this way instead.
@@ -17,7 +18,7 @@ permissions:
 
 concurrency:
   group: dependency-review-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   dependency-review:
@@ -36,6 +37,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
           HEAD_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -48,6 +51,11 @@ jobs:
               printf '::error::No open pull request for branch %s to review dependencies for.\n' "$HEAD_REF"
               exit 1
             fi
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            # WHY: merge queue stages the PR onto the current main; compare the staged
+            # merge commit's base/head SHAs provided by the merge_group payload.
+            BASE_REF="$MG_BASE"
+            HEAD_REF_SHA="$MG_HEAD"
           else
             BASE_REF="$PR_BASE"
             HEAD_REF_SHA="$PR_HEAD"
@@ -57,7 +65,8 @@ jobs:
       # WHY: actions/checkout is intentionally omitted. actions/dependency-review-action v5.0.0
       # compares dependency manifests using GitHub's Dependency Review API. Local workspace
       # files are not read when configuration is inline; the comparison refs come from the
-      # resolve step (the PR event payload on pull_request, the release PR on dispatch).
+      # resolve step (the PR event payload on pull_request, the merge_group payload in a
+      # merge queue, or the release PR on workflow_dispatch).
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
