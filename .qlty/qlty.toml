@@ -24,6 +24,13 @@ default = true
 enabled = true
 threshold = 1000
 
+# WHY: Qlty's `threshold` is the minimum offending nesting level (`level >= threshold`, default 5).
+# Setting `threshold = 5` allows `<= 4` levels and flags `level >= 5`, matching ESLint's
+# `"max-depth": ["error", 4]` and 5-level `MAX_CONTROL_FLOW_DEPTH_SELECTOR`.
+[smells.nested_control_flow]
+enabled = true
+threshold = 5
+
 # Disable third-party linters so CI workflows (.github/workflows/ci.yml, semgrep.yml,
 # secret-scan.yml, workflow-lint.yml) remain the single source of truth.
 [[plugin]]
