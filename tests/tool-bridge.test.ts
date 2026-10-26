@@ -1118,5 +1118,23 @@ describe("listAllTools pagination", () => {
     assert.equal(tools[2]?.name, "tool_c");
     assert.equal(pageIndex, 3); // exactly 3 requests made
   });
+
+  it("stops at the max-page guard when a broken server keeps returning a cursor", async () => {
+    let requests = 0;
+    const mockClient = {
+      request: async () => {
+        requests++;
+        // A malfunctioning server that never stops paginating.
+        return {
+          tools: [{ name: `tool_${requests}`, inputSchema: {} }],
+          nextCursor: `page${requests + 1}`,
+        };
+      },
+    } as unknown as Client;
+
+    const tools = await listAllTools(mockClient, 30000);
+    assert.equal(requests, 100, "must stop requesting after the 100-page guard trips");
+    assert.equal(tools.length, 100);
+  });
 });
 

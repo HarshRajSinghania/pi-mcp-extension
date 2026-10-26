@@ -101,6 +101,20 @@ export function sanitizeLogText(
 }
 
 /**
+ * Sanitize a single allow-listed field value.
+ * Non-finite numbers and `undefined` are dropped (`undefined`) so they never
+ * reach the log line.
+ */
+function sanitizeFieldValue(value: LogFieldValue | undefined): LogFieldValue | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "boolean") return value;
+  return sanitizeLogText(value);
+}
+
+/**
  * Keep only allow-listed field names, and sanitize the values of the ones
  * that are kept.
  */
@@ -109,17 +123,9 @@ export function sanitizeLogFields(fields: LogFields | undefined): Record<string,
   if (!fields) return out;
   for (const [key, value] of Object.entries(fields)) {
     if (!SAFE_FIELD_NAME_SET.has(key)) continue;
-    if (value === undefined) continue;
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) continue;
-      out[key] = value;
-      continue;
-    }
-    if (typeof value === "boolean") {
-      out[key] = value;
-      continue;
-    }
-    out[key] = sanitizeLogText(value);
+    const sanitized = sanitizeFieldValue(value);
+    if (sanitized === undefined) continue;
+    out[key] = sanitized;
   }
   return out;
 }

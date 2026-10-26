@@ -115,6 +115,106 @@ export function convertMcpContent(items: unknown[]): (PiTextContent | PiImageCon
   return items.map(convertMcpContentItem);
 }
 
+// ─── Tool Call Execution ──────────────────────────────────────────────────────
+
+type PiContent = PiTextContent | PiImageContent;
+
+/** Tool call result shape Pi expects from `execute`. */
+interface ToolCallOutcome {
+  content: PiContent[];
+  details: Record<string, never>;
+}
+
+/**
+ * The subset of an SDK `tools/call` response the bridge consumes.
+ * Legacy servers answer with `toolResult` instead of `content`, so every field
+ * stays optional and unvalidated here — `convertMcpContent` handles the blocks.
+ * The index signature keeps the SDK's compatibility result assignable.
+ */
+interface ToolCallResponse {
+  [key: string]: unknown;
+  content?: unknown;
+  structuredContent?: unknown;
+  isError?: unknown;
+}
+
+/** Append the tool's annotation hints to its description so the LLM sees them. */
+function buildToolDescription(tool: McpToolDefinition): string {
+  const description = tool.description ?? `MCP tool: ${tool.name}`;
+  const ann = tool.annotations;
+  if (!ann) return description;
+  const hints: string[] = [];
+  if (ann.readOnlyHint) hints.push("read-only");
+  if (ann.destructiveHint) hints.push("⚠️ destructive");
+  if (ann.idempotentHint) hints.push("idempotent");
+  if (ann.openWorldHint) hints.push("may have side effects");
+  return hints.length > 0 ? `${description} [${hints.join(", ")}]` : description;
+}
+
+/** Call tools/call through the typed helper when present, else a raw JSON-RPC request. */
+function callToolWithClient(
+  client: Client,
+  toolName: string,
+  params: unknown,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<ToolCallResponse> {
+  const requestOptions = {
+    timeout: timeoutMs,
+    // Pass AbortSignal to SDK — it will automatically send
+    // notifications/cancelled when the signal fires
+    ...(signal ? { signal } : {}),
+  };
+  if (typeof client.callTool === "function") {
+    return client.callTool(
+      { name: toolName, arguments: params as Record<string, unknown> },
+      CallToolResultSchema,
+      requestOptions,
+    );
+  }
+  return client.request(
+    {
+      method: "tools/call",
+      params: { name: toolName, arguments: params },
+    },
+    CallToolResultSchema,
+    requestOptions,
+  );
+}
+
+/**
+ * Convert a callTool result into Pi content blocks, falling back to
+ * `structuredContent` when the server returned no content blocks.
+ */
+function buildToolCallContent(result: ToolCallResponse): PiContent[] {
+  const content = convertMcpContent((result.content ?? []) as Array<Record<string, unknown>>);
+  if (content.length > 0 || result.structuredContent === undefined) return content;
+  const structured = result.structuredContent;
+  content.push({
+    type: "text",
+    text: typeof structured === "string" ? structured : JSON.stringify(structured, null, 2),
+  });
+  return content;
+}
+
+/** Text blocks of a failed tool call, joined into the McpError message. */
+function toolErrorText(content: readonly PiContent[]): string {
+  return content
+    .filter((c): c is PiTextContent => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
+}
+
+/** Normalize `refreshTools`' overloaded argument shapes (callback vs. options object). */
+function normalizeRefreshArgs(
+  isCurrentOrOptions?: (() => boolean) | ToolRefreshOptions,
+  maybeOptions?: ToolRefreshOptions,
+): { isCurrent: () => boolean; options: ToolRefreshOptions | undefined } {
+  const isCurrent = typeof isCurrentOrOptions === "function" ? isCurrentOrOptions : () => true;
+  const options = typeof isCurrentOrOptions === "object" ? isCurrentOrOptions : maybeOptions;
+  return { isCurrent, options };
+}
+
 // ─── Tool Listing ─────────────────────────────────────────────────────────────
 
 export { listAllTools, type McpToolDefinition } from "./tool-discovery.js";
@@ -172,73 +272,21 @@ export class ToolBridge {
     isCurrentOrOptions?: (() => boolean) | ToolRefreshOptions,
     maybeOptions?: ToolRefreshOptions,
   ): Promise<void> {
-    const isCurrent = typeof isCurrentOrOptions === "function" ? isCurrentOrOptions : () => true;
-    const options = typeof isCurrentOrOptions === "object" ? isCurrentOrOptions : maybeOptions;
-    const explicitTimeoutMs = options?.requestTimeoutMs;
-    const effectiveTimeoutMs = explicitTimeoutMs ?? this.settings.requestTimeoutMs;
-    const effectiveSignal = options?.signal;
-    if (explicitTimeoutMs !== undefined) {
-      this.serverTimeouts.set(serverName, explicitTimeoutMs);
-    } else {
-      this.serverTimeouts.delete(serverName);
-    }
+    const { isCurrent, options } = normalizeRefreshArgs(isCurrentOrOptions, maybeOptions);
+    const effectiveTimeoutMs = this._recordServerTimeout(serverName, options?.requestTimeoutMs);
+    const gen = this._bumpRefreshGeneration(serverName);
 
-    const gen = (this.refreshGenerations.get(serverName) ?? 0) + 1;
-    this.refreshGenerations.set(serverName, gen);
-
-    let tools: McpToolDefinition[];
-    try {
-      tools = await listAllTools(client, effectiveTimeoutMs, effectiveSignal, serverName);
-    } catch (err) {
-      if (
-        err instanceof AuthCancelledError ||
-        effectiveSignal?.aborted ||
-        (err instanceof Error && err.name === "AbortError")
-      ) {
-        throw err instanceof AuthCancelledError ? err : new AuthCancelledError(serverName);
-      }
-      if (isOAuthUnauthorizedError(err)) {
-        await this.onAuthError?.(serverName, err);
-      }
-      throw new McpError(
-        `Failed to list tools from ${serverName}: ${err instanceof Error ? err.message : String(err)}`,
-        serverName,
-        "protocol",
-        err,
-      );
-    }
+    const tools = await this._fetchToolsForServer(
+      serverName,
+      client,
+      effectiveTimeoutMs,
+      options?.signal,
+    );
 
     // WHY: Discard stale tools/list responses if a newer refreshTools(),
     // deactivateServer(), or removeServerTools() occurred while listAllTools() was in flight.
     if (this.refreshGenerations.get(serverName) !== gen || !isCurrent()) return;
-    const registeredForServer = this.serverToolNames.get(serverName) ?? new Set<string>();
-
-    // Build the set of currently valid Pi tool names for this server
-    const currentToolNames = new Set<string>();
-
-    for (const tool of tools) {
-      const piName = this._resolveUniqueToolName(serverName, tool.name, currentToolNames);
-      currentToolNames.add(piName);
-      this.toolOwners.set(piName, serverName);
-      // Always re-register — on reconnect the client reference changes and
-      // Pi's registerTool overwrites by name, so this is idempotent.
-      this._registerTool(piName, serverName, tool, client);
-    }
-
-    // Deactivate tools that were removed from the server (no longer in tools/list)
-    for (const existingName of registeredForServer) {
-      if (!currentToolNames.has(existingName)) {
-        this._deactivateServerTool(serverName, existingName);
-        if (this.toolOwners.get(existingName) === serverName) {
-          this.toolOwners.delete(existingName);
-        }
-      }
-    }
-
-    this.serverToolNames.set(serverName, currentToolNames);
-
-    // Activate all current tools for this server
-    this._activateServerTools(serverName);
+    this._reconcileTools(serverName, tools, client);
   }
 
   /** Report discovery separately from the tools currently exposed by Pi. */
@@ -250,8 +298,7 @@ export class ToolBridge {
 
   /** Deactivate all Pi tools belonging to a server (called on disconnect). */
   deactivateServer(serverName: string): void {
-    const gen = (this.refreshGenerations.get(serverName) ?? 0) + 1;
-    this.refreshGenerations.set(serverName, gen);
+    this._bumpRefreshGeneration(serverName);
     this._deactivateServerTools(serverName);
   }
 
@@ -262,8 +309,7 @@ export class ToolBridge {
 
   /** Remove all tools and ownership tracking for a server. */
   removeServerTools(serverName: string): void {
-    const gen = (this.refreshGenerations.get(serverName) ?? 0) + 1;
-    this.refreshGenerations.set(serverName, gen);
+    this._bumpRefreshGeneration(serverName);
     this.serverTimeouts.delete(serverName);
     this._deactivateServerTools(serverName);
     const existing = this.serverToolNames.get(serverName);
@@ -283,6 +329,89 @@ export class ToolBridge {
   }
 
   // ─── Internal ───────────────────────────────────────────────────────────────
+
+  /** Advance the per-server refresh generation so in-flight refreshes are discarded. */
+  private _bumpRefreshGeneration(serverName: string): number {
+    const gen = (this.refreshGenerations.get(serverName) ?? 0) + 1;
+    this.refreshGenerations.set(serverName, gen);
+    return gen;
+  }
+
+  /**
+   * Record (or clear) the per-server request timeout override and return the
+   * timeout this refresh must use.
+   */
+  private _recordServerTimeout(serverName: string, explicitTimeoutMs: number | undefined): number {
+    if (explicitTimeoutMs !== undefined) {
+      this.serverTimeouts.set(serverName, explicitTimeoutMs);
+      return explicitTimeoutMs;
+    }
+    this.serverTimeouts.delete(serverName);
+    return this.settings.requestTimeoutMs;
+  }
+
+  /**
+   * Discover a server's tools, normalizing aborts into {@link AuthCancelledError}
+   * and every other failure into an `McpError("protocol")`.
+   */
+  private async _fetchToolsForServer(
+    serverName: string,
+    client: Client,
+    effectiveTimeoutMs: number,
+    effectiveSignal: AbortSignal | undefined,
+  ): Promise<McpToolDefinition[]> {
+    try {
+      return await listAllTools(client, effectiveTimeoutMs, effectiveSignal, serverName);
+    } catch (err) {
+      if (
+        err instanceof AuthCancelledError ||
+        effectiveSignal?.aborted ||
+        (err instanceof Error && err.name === "AbortError")
+      ) {
+        throw err instanceof AuthCancelledError ? err : new AuthCancelledError(serverName);
+      }
+      if (isOAuthUnauthorizedError(err)) {
+        await this.onAuthError?.(serverName, err);
+      }
+      throw new McpError(
+        `Failed to list tools from ${serverName}: ${err instanceof Error ? err.message : String(err)}`,
+        serverName,
+        "protocol",
+        err,
+      );
+    }
+  }
+
+  /**
+   * Register the freshly discovered tools, deactivate the ones the server
+   * dropped, then activate the server's current set.
+   */
+  private _reconcileTools(serverName: string, tools: McpToolDefinition[], client: Client): void {
+    const registeredForServer = this.serverToolNames.get(serverName) ?? new Set<string>();
+
+    // Build the set of currently valid Pi tool names for this server
+    const currentToolNames = new Set<string>();
+    for (const tool of tools) {
+      const piName = this._resolveUniqueToolName(serverName, tool.name, currentToolNames);
+      currentToolNames.add(piName);
+      this.toolOwners.set(piName, serverName);
+      // Always re-register — on reconnect the client reference changes and
+      // Pi's registerTool overwrites by name, so this is idempotent.
+      this._registerTool(piName, serverName, tool, client);
+    }
+
+    // Deactivate tools that were removed from the server (no longer in tools/list)
+    for (const existingName of registeredForServer) {
+      if (currentToolNames.has(existingName)) continue;
+      this._deactivateServerTool(serverName, existingName);
+      if (this.toolOwners.get(existingName) === serverName) {
+        this.toolOwners.delete(existingName);
+      }
+    }
+
+    this.serverToolNames.set(serverName, currentToolNames);
+    this._activateServerTools(serverName);
+  }
 
   private _isToolNameTaken(name: string, serverName: string, seenInBatch: ReadonlySet<string>): boolean {
     if (seenInBatch.has(name)) return true;
@@ -330,85 +459,21 @@ export class ToolBridge {
     tool: McpToolDefinition,
     client: Client,
   ): void {
-    // Build description with annotation hints for LLM guidance
-    let description = tool.description ?? `MCP tool: ${tool.name}`;
-    const ann = tool.annotations;
-    if (ann) {
-      const hints: string[] = [];
-      if (ann.readOnlyHint) hints.push("read-only");
-      if (ann.destructiveHint) hints.push("⚠️ destructive");
-      if (ann.idempotentHint) hints.push("idempotent");
-      if (ann.openWorldHint) hints.push("may have side effects");
-      if (hints.length > 0) description += ` [${hints.join(", ")}]`;
-    }
-
-    const schema = convertJsonSchemaToTypebox(tool.inputSchema);
-    const getEffectiveTimeoutMs = () =>
-      this.serverTimeouts.get(serverName) ?? this.settings.requestTimeoutMs;
+    const description = buildToolDescription(tool);
     const notifyAuthError = (err: unknown) => this.onAuthError?.(serverName, err);
+    const runTool = (params: unknown, signal: AbortSignal | undefined) =>
+      this._executeToolCall(serverName, tool.name, client, params, signal);
 
     this.pi.registerTool({
       name: piName,
-      label: ann?.title ?? tool.name,
+      label: tool.annotations?.title ?? tool.name,
       description,
       promptSnippet: description.slice(0, 120),
-      parameters: schema,
+      parameters: convertJsonSchemaToTypebox(tool.inputSchema),
 
-      async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-        if (signal?.aborted) {
-          throw new McpError("Tool execution cancelled", serverName, "protocol");
-        }
-
-        const effectiveTimeoutMs = getEffectiveTimeoutMs();
-        const requestOptions = {
-          timeout: effectiveTimeoutMs,
-          ...(signal ? { signal } : {}),
-        };
-
+      async execute(_toolCallId, params, signal) {
         try {
-          const result =
-            typeof client.callTool === "function"
-              ? await client.callTool(
-                  { name: tool.name, arguments: params as Record<string, unknown> },
-                  CallToolResultSchema,
-                  requestOptions,
-                )
-              : await client.request(
-                  {
-                    method: "tools/call",
-                    params: { name: tool.name, arguments: params },
-                  },
-                  CallToolResultSchema,
-                  // Pass AbortSignal to SDK — it will automatically send
-                  // notifications/cancelled when the signal fires
-                  requestOptions,
-                );
-
-          const content = convertMcpContent(
-            (result.content ?? []) as Array<Record<string, unknown>>,
-          );
-          if (content.length === 0 && result.structuredContent !== undefined) {
-            const serialized =
-              typeof result.structuredContent === "string"
-                ? result.structuredContent
-                : JSON.stringify(result.structuredContent, null, 2);
-            content.push({ type: "text", text: serialized });
-          }
-
-          // Tool execution errors (isError: true) — distinct from protocol errors
-          if (result.isError) {
-            const errorText = content
-              .filter((c): c is PiTextContent => c.type === "text")
-              .map((c) => c.text)
-              .join("\n");
-            throw new McpError(
-              errorText || "Tool reported an error",
-              serverName,
-              "tool",
-            );
-          }
-
-          return { content, details: {} };
+          return await runTool(params, signal);
         } catch (err) {
           if (err instanceof McpError) throw err;
           if (isOAuthUnauthorizedError(err)) {
@@ -426,6 +491,37 @@ export class ToolBridge {
     });
   }
 
+  /**
+   * Run one `tools/call`: dispatch through the SDK client, convert the result
+   * into Pi content blocks, and surface `isError` as `McpError(..., "tool")`.
+   */
+  private async _executeToolCall(
+    serverName: string,
+    toolName: string,
+    client: Client,
+    params: unknown,
+    signal: AbortSignal | undefined,
+  ): Promise<ToolCallOutcome> {
+    if (signal?.aborted) {
+      throw new McpError("Tool execution cancelled", serverName, "protocol");
+    }
+
+    const result = await callToolWithClient(
+      client,
+      toolName,
+      params,
+      this.serverTimeouts.get(serverName) ?? this.settings.requestTimeoutMs,
+      signal,
+    );
+    const content = buildToolCallContent(result);
+
+    // Tool execution errors (isError: true) — distinct from protocol errors
+    if (result.isError) {
+      throw new McpError(toolErrorText(content) || "Tool reported an error", serverName, "tool");
+    }
+
+    return { content, details: {} };
+  }
 
   private _activateServerTools(serverName: string): void {
     const serverTools = this.serverToolNames.get(serverName);
