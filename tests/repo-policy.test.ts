@@ -281,6 +281,20 @@ describe("coverage and Qlty maintainability policy", () => {
     );
   });
 
+  it("configures @typescript-eslint/max-params with max 5 in eslint.config.mjs", () => {
+    const eslintConfig = readRepoFile("eslint.config.mjs");
+    assert.match(
+      eslintConfig,
+      /"@typescript-eslint\/max-params":\s*\[\s*"error",\s*\{\s*max:\s*5\s*\}\s*\]/,
+      "eslint.config.mjs must enforce @typescript-eslint/max-params with max: 5 (Qlty's function-parameters threshold, and the limit that keeps the 5-argument ToolDefinition.execute callback legal) so npm run lint catches a 6-parameter function before Qlty does",
+    );
+    assert.match(
+      eslintConfig,
+      /files:\s*\["tests\/\*\*\/\*\.ts"\][\s\S]*?"@typescript-eslint\/max-params":\s*"off"/,
+      "eslint.config.mjs must turn @typescript-eslint/max-params off for tests/**/*.ts (fast-check fc.property combinators pass one callback parameter per arbitrary)",
+    );
+  });
+
   it("enforces max-return-statements AST policy on direct returns and nested callbacks", async () => {
     const { RuleTester } = await import("eslint");
     // @ts-expect-error -- WHY: eslint.config.mjs is a pure JS flat config module without ambient type declarations.
@@ -684,3 +698,4 @@ describe("coverage and Qlty maintainability policy", () => {
     );
   });
 });
+
