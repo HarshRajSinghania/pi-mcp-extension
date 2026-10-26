@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   agentDir,
   loadConfig as loadConfigFile,
+  loadConfigWithOrigins,
   parseRegisteredServerConfig,
 } from "../src/config.js";
 import { stripJsonComments } from "../src/jsonc.js";
@@ -955,3 +956,234 @@ describe("Issue #28: Config validation and error handling", () => {
 });
 
 
+
+// ── Issue #215: Pi 1.3.0 config interoperability ──────────────────────────────
+//
+// Pi 1.3.0 (@earendil-works/pi-coding-agent) writes project overrides without `command`/`url`,
+// keeps `enabled` in `mcp.json`, supports a per-server stdio `cwd`, and rejects its own
+// `/login` provider auth (`auth.provider`) in favor of OAuth. A config shared between Pi and
+// this extension must load without silently changing what the user asked for.
+
+describe("Issue #215: Pi 1.3.0 config interoperability", () => {
+  const globalConfigPath = (dir: string): string => join(dir, "isolated-global-mcp.json");
+
+  async function writeGlobalConfig(dir: string, content: unknown): Promise<void> {
+    await writeFile(globalConfigPath(dir), JSON.stringify(content));
+  }
+
+  async function loadBoth(dir: string): Promise<Awaited<ReturnType<typeof loadConfigWithOrigins>>> {
+    return loadConfigWithOrigins(dir, globalConfigPath(dir), { includeProjectConfig: true });
+  }
+
+  function expectConfigError(fragment: string): (err: unknown) => boolean {
+    return (err: unknown) => {
+      assert.ok(err instanceof McpError, `Expected McpError, got ${String(err)}`);
+      assert.equal(err.code, "config");
+      assert.ok(err.message.includes(fragment), `Expected "${fragment}" in: ${err.message}`);
+      return true;
+    };
+  }
+
+  it("merges a partial Pi 1.3.0 project override onto the global server instead of rejecting the file", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, {
+        mcpServers: {
+          internal_tools: { command: "node", args: ["internal.js"], lifecycle: "eager" },
+          untouched: { command: "node", args: ["untouched.js"], lifecycle: "eager" },
+        },
+      });
+      await writeMcpJson(dir, { mcpServers: { internal_tools: { enabled: false } } });
+
+      const loaded = await loadBoth(dir);
+      const overridden = loaded.config.mcpServers["internal_tools"];
+
+      assert.ok(overridden);
+      assert.equal(overridden.command, "node");
+      assert.deepEqual(overridden.args, ["internal.js"]);
+      assert.equal(overridden.lifecycle, "lazy", "enabled: false must keep the server out of the eager set");
+      assert.equal(loaded.origins["internal_tools"], "project");
+      assert.equal(loaded.config.mcpServers["untouched"]?.lifecycle, "eager");
+    });
+  });
+
+  it("accepts Pi-native exposure keys in a project override and applies lifecycle", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, {
+        mcpServers: { docs: { url: "https://mcp.example.com/mcp", lifecycle: "eager" } },
+      });
+      await writeMcpJson(dir, {
+        mcpServers: {
+          docs: { lifecycle: "lazy", exposure: "hidden", toolExposure: { search: "hidden" } },
+        },
+      });
+
+      const loaded = await loadBoth(dir);
+      const docs = loaded.config.mcpServers["docs"];
+
+      assert.ok(docs);
+      assert.equal(docs.url, "https://mcp.example.com/mcp");
+      assert.equal(docs.transport, "streamable-http");
+      assert.equal(docs.lifecycle, "lazy");
+    });
+  });
+
+  it("rejects a project override for a server no config defines, even when non-override keys are present", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, { mcpServers: { known: { command: "node" } } });
+      await writeMcpJson(dir, {
+        mcpServers: {
+          unknown_server: { enabled: false },
+        },
+      });
+
+      await assert.rejects(
+        () => loadBoth(dir),
+        expectConfigError('mcpServers.unknown_server: a project override needs "command" or "url" in this file, or a global server of that name'),
+      );
+
+      // A standalone project entry that forgot "command"/"url" (e.g. only "args") must report
+      // the missing command/url / missing global server rather than the override-keys message.
+      await writeMcpJson(dir, {
+        mcpServers: {
+          missing_command_local: { args: ["server.js"] },
+        },
+      });
+
+      await assert.rejects(
+        () => loadBoth(dir),
+        expectConfigError('mcpServers.missing_command_local: a project override needs "command" or "url" in this file, or a global server of that name'),
+      );
+    });
+  });
+
+  it("rejects a project override that sets keys other than the override keys", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, { mcpServers: { known: { command: "node" } } });
+      await writeMcpJson(dir, { mcpServers: { known: { args: ["sneaky.js"] } } });
+
+      await assert.rejects(() => loadBoth(dir), expectConfigError("enabled, exposure, toolExposure, lifecycle"));
+    });
+  });
+
+  it("allows a project override with lifecycle: eager or enabled: true to promote a globally disabled server", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, {
+        mcpServers: {
+          via_lifecycle: { command: "node", args: ["a.js"], enabled: false },
+          via_enabled: { command: "node", args: ["b.js"], lifecycle: "eager", enabled: false },
+          still_disabled: { command: "node", args: ["c.js"], enabled: false },
+        },
+      });
+      await writeMcpJson(dir, {
+        mcpServers: {
+          via_lifecycle: { lifecycle: "eager" },
+          via_enabled: { enabled: true },
+          still_disabled: { lifecycle: "eager", enabled: false },
+        },
+      });
+
+      const loaded = await loadBoth(dir);
+
+      assert.equal(loaded.config.mcpServers["via_lifecycle"]?.lifecycle, "eager");
+      assert.equal(loaded.config.mcpServers["via_enabled"]?.lifecycle, "eager");
+      assert.equal(loaded.config.mcpServers["still_disabled"]?.lifecycle, "lazy");
+    });
+  });
+
+  it("maps enabled: false to lifecycle lazy even when lifecycle is explicitly eager", async () => {
+    await withTempDir(async (dir) => {
+      await writeGlobalConfig(dir, {
+        mcpServers: {
+          disabled: { command: "node", lifecycle: "eager", enabled: false },
+          active: { command: "node", lifecycle: "eager", enabled: true },
+        },
+      });
+
+      const cfg = await loadConfig(dir);
+
+      assert.equal(cfg.mcpServers["disabled"]?.lifecycle, "lazy");
+      assert.equal(cfg.mcpServers["active"]?.lifecycle, "eager");
+
+      const regDisabled = parseRegisteredServerConfig("ext", {
+        command: "node",
+        lifecycle: "eager",
+        enabled: false,
+      });
+      assert.equal(regDisabled.lifecycle, "lazy");
+    });
+  });
+
+  it("rejects a non-boolean enabled value at config load time", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, { mcpServers: { bad: { command: "node", enabled: "no" } } });
+
+      await assert.rejects(() => loadConfig(dir), expectConfigError("enabled"));
+    });
+  });
+
+  it("accepts stdio cwd and keeps the rest of the entry intact", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: { local: { command: "node", args: ["s.js"], cwd: "./sub" } },
+      });
+
+      const cfg = await loadConfig(dir);
+
+      assert.equal(cfg.mcpServers["local"]?.cwd, "./sub");
+    });
+  });
+
+  it("rejects cwd on a non-stdio transport and rejects empty or non-string cwd", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: { remote: { url: "https://mcp.example.com/mcp", cwd: "./sub" } },
+      });
+
+      await assert.rejects(() => loadConfig(dir), expectConfigError("cwd"));
+
+      await writeMcpJson(dir, {
+        mcpServers: { emptyCwd: { command: "node", cwd: "" } },
+      });
+
+      await assert.rejects(() => loadConfig(dir), expectConfigError("cwd"));
+    });
+  });
+
+  it("accepts stdio cwd on a pi.registerMcpServer() config", () => {
+    const registered = parseRegisteredServerConfig("registered", { command: "node", cwd: "./sub" });
+
+    assert.equal(registered.cwd, "./sub");
+  });
+
+  it("rejects Pi's unsupported auth.provider instead of silently downgrading it to OAuth", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: { provider: { url: "https://mcp.example.com/mcp", auth: { provider: "github" } } },
+      });
+
+      await assert.rejects(() => loadConfig(dir), expectConfigError("auth.provider"));
+    });
+  });
+
+  it("carries Pi's oauth.clientName through to the DCR client metadata name and rejects blank clientName", async () => {
+    await withTempDir(async (dir) => {
+      await writeMcpJson(dir, {
+        mcpServers: {
+          named: { url: "https://mcp.example.com/mcp", oauth: { clientName: "  custom-client  " } },
+        },
+      });
+
+      const cfg = await loadConfig(dir);
+
+      assert.equal(cfg.mcpServers["named"]?.auth?.clientName, "custom-client");
+
+      await writeMcpJson(dir, {
+        mcpServers: {
+          blank: { url: "https://mcp.example.com/mcp", oauth: { clientName: "   " } },
+        },
+      });
+
+      await assert.rejects(() => loadConfig(dir), expectConfigError("clientName"));
+    });
+  });
+});
