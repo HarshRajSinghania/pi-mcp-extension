@@ -6,7 +6,7 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsResultSchema, type ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
 import { AuthCancelledError } from "./errors.js";
 import { reportDiagnostic } from "./debug-log.js";
 
@@ -25,6 +25,88 @@ export interface McpToolDefinition {
   };
 }
 
+/** Upper bound on tools/list pages, so a malfunctioning server cannot page us forever. */
+const MAX_PAGES = 100;
+
+/** Report the max-page guard tripping, then let the caller stop paginating. */
+function reportPaginationLimit(serverName: string, pageCount: number): void {
+  reportDiagnostic({
+    level: "warn",
+    event: "tools.pagination_limit",
+    server: serverName,
+    message: `tools/list pagination exceeded ${MAX_PAGES} pages, stopping. The server may be malfunctioning.`,
+    fields: { pages: pageCount },
+  });
+}
+
+/**
+ * Race a tools/list request against an abort signal.
+ * Abort wins as {@link AuthCancelledError}; the in-flight request is left to
+ * settle on its own (its rejection is suppressed).
+ */
+async function raceWithAbort(
+  callPromise: Promise<ListToolsResult>,
+  signal: AbortSignal,
+  serverName: string,
+): Promise<ListToolsResult> {
+  callPromise.catch(() => {
+    // WHY: Suppress unhandled rejection if in-flight listTools rejects after abort wins the race.
+  });
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(new AuthCancelledError(serverName));
+      return;
+    }
+    onAbort = () => reject(new AuthCancelledError(serverName));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([callPromise, abortPromise]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/**
+ * Request one tools/list page: use the SDK's typed `listTools()` helper when the
+ * client provides it, and fall back to a raw JSON-RPC request otherwise.
+ */
+function fetchToolsPage(
+  client: Client,
+  cursor: string | undefined,
+  requestTimeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<ListToolsResult> {
+  const requestOptions = {
+    timeout: requestTimeoutMs,
+    ...(signal ? { signal } : {}),
+  };
+  if (typeof client.listTools === "function") {
+    return client.listTools(cursor ? { cursor } : undefined, requestOptions);
+  }
+  return client.request(
+    { method: "tools/list", params: cursor ? { cursor } : {} },
+    ListToolsResultSchema,
+    requestOptions,
+  );
+}
+
+/** Fetch one page, cooperating with `signal` when the caller passed one. */
+function fetchToolsPageAbortable(
+  client: Client,
+  cursor: string | undefined,
+  requestTimeoutMs: number,
+  signal: AbortSignal | undefined,
+  serverName: string,
+): Promise<ListToolsResult> {
+  const page = fetchToolsPage(client, cursor, requestTimeoutMs, signal);
+  if (!signal) return page;
+  return raceWithAbort(page, signal, serverName);
+}
+
 /**
  * Fetch all tools from a server using cursor-based pagination.
  * The MCP spec mandates clients follow nextCursor until exhausted.
@@ -38,7 +120,6 @@ export async function listAllTools(
 ): Promise<McpToolDefinition[]> {
   const tools: McpToolDefinition[] = [];
   let cursor: string | undefined;
-  const MAX_PAGES = 100;
   let pageCount = 0;
 
   do {
@@ -46,55 +127,13 @@ export async function listAllTools(
       throw new AuthCancelledError(serverName);
     }
     if (pageCount >= MAX_PAGES) {
-      reportDiagnostic({
-        level: "warn",
-        event: "tools.pagination_limit",
-        server: serverName,
-        message: `tools/list pagination exceeded ${MAX_PAGES} pages, stopping. The server may be malfunctioning.`,
-        fields: { pages: pageCount },
-      });
+      reportPaginationLimit(serverName, pageCount);
       break;
     }
-    const requestOptions = {
-      timeout: requestTimeoutMs,
-      ...(signal ? { signal } : {}),
-    };
-    const callPromise =
-      typeof client.listTools === "function"
-        ? client.listTools(cursor ? { cursor } : undefined, requestOptions)
-        : client.request(
-            { method: "tools/list", params: cursor ? { cursor } : {} },
-            ListToolsResultSchema,
-            requestOptions,
-          );
 
-    let result: Awaited<typeof callPromise>;
-    if (signal) {
-      callPromise.catch(() => {
-        // WHY: Suppress unhandled rejection if in-flight listTools rejects after abort wins the race.
-      });
-      let onAbort: (() => void) | undefined;
-      const abortPromise = new Promise<never>((_resolve, reject) => {
-        if (signal.aborted) {
-          reject(new AuthCancelledError(serverName));
-          return;
-        }
-        onAbort = () => reject(new AuthCancelledError(serverName));
-        signal.addEventListener("abort", onAbort, { once: true });
-      });
-      try {
-        result = await Promise.race([callPromise, abortPromise]);
-      } finally {
-        if (onAbort) {
-          signal.removeEventListener("abort", onAbort);
-        }
-      }
-    } else {
-      result = await callPromise;
-    }
-
-    tools.push(...(result.tools as McpToolDefinition[]));
-    cursor = result.nextCursor;
+    const page = await fetchToolsPageAbortable(client, cursor, requestTimeoutMs, signal, serverName);
+    tools.push(...(page.tools as McpToolDefinition[]));
+    cursor = page.nextCursor;
     pageCount++;
   } while (cursor);
 
