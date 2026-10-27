@@ -35,6 +35,8 @@ type SchemaProps = Record<
   | "email"
   | "actor"
   | "host"
+  | "limit"
+  | "tag"
   | "next"
   | "value"
   | "start"
@@ -210,15 +212,179 @@ describe("convertJsonSchemaToTypebox", () => {
     assert.equal(withNonArrayOneOf.anyOf[1].type, "string");
   });
 
-  it("converts allOf to Intersect", () => {
+  it("converts object-composing allOf to an object that keeps the Intersect members", () => {
     const schema = convertJsonSchemaToTypebox({
       allOf: [
         { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
         { type: "object", properties: { age: { type: "number" } }, required: ["age"] },
       ],
     }) as SchemaJson;
-    assert.ok(schema.allOf, "allOf should produce an Intersect (allOf)");
+    assert.equal(schema.type, "object");
+    assert.equal(schema.properties.name.type, "string");
+    assert.equal(schema.properties.age.type, "number");
+    assert.deepEqual(schema.required, ["name", "age"]);
+    assert.ok(schema.allOf, "allOf members are preserved (Intersect semantics)");
     assert.equal(schema.allOf.length, 2);
+  });
+
+  it("infers an object schema when allOf composes object sub-schemas or $refs without repeating type", async () => {
+    const { validateToolArguments } = await import("@earendil-works/pi-ai");
+    const defs = {
+      Pagination: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1 },
+          tag: { type: "string" },
+        },
+      },
+    };
+    const wrapper = {
+      allOf: [
+        { $ref: "#/$defs/Pagination" },
+        { properties: { str: { type: "string" } }, required: ["str"] },
+      ],
+    };
+    const implicit = convertJsonSchemaToTypebox({
+      type: "object",
+      properties: { filter: wrapper },
+      required: ["filter"],
+      $defs: defs,
+    }) as SchemaJson;
+    const filter = implicit.properties.filter;
+    assert.equal(filter.type, "object", "allOf of objects must infer type: object");
+    assert.equal(filter.properties.limit.type, "integer");
+    assert.equal(filter.properties.limit.minimum, 1);
+    assert.equal(filter.properties.tag.type, "string");
+    assert.equal(filter.properties.str.type, "string");
+    assert.deepEqual(filter.required, ["str"]);
+    assert.ok(Array.isArray(filter.allOf), "allOf members are preserved");
+
+    // End-to-end Pi validation: optional nulls inside the allOf-composed object are
+    // stripped by normalizeOptionalNulls instead of coerced into 0 / "" by Value.Convert.
+    const validated = validateToolArguments(
+      { name: "search", description: "search", parameters: implicit },
+      {
+        type: "toolCall",
+        id: "call_1",
+        name: "search",
+        arguments: { filter: { limit: null, tag: null, str: "hello" } },
+      },
+    );
+    assert.deepEqual(validated, { filter: { str: "hello" } });
+
+    // The wrapper converts identically whether or not it repeats `type: "object"`.
+    const explicit = convertJsonSchemaToTypebox({
+      type: "object",
+      properties: { filter: { type: "object", ...wrapper } },
+      required: ["filter"],
+      $defs: defs,
+    }) as SchemaJson;
+    assert.deepEqual(filter, explicit.properties.filter);
+
+    // A top-level allOf tool schema keeps `properties` for provider adapters that
+    // build `input_schema` from `schema.properties`.
+    const topLevel = convertJsonSchemaToTypebox({
+      allOf: [{ $ref: "#/$defs/Pagination" }, { properties: { str: { type: "string" } } }],
+      $defs: defs,
+    }) as SchemaJson;
+    assert.equal(topLevel.type, "object");
+    assert.equal(topLevel.properties.limit.type, "integer");
+    assert.equal(topLevel.properties.str.type, "string");
+  });
+
+  it("flattens nested allOf chains, chained $ref definitions, and sibling properties alongside $ref", () => {
+    const schema = convertJsonSchemaToTypebox({
+      allOf: [
+        {
+          allOf: [
+            {
+              $ref: "#/$defs/Base",
+              properties: { str: { type: "string" } },
+              required: ["str"],
+            },
+            { properties: { id: { type: "string" } }, required: ["id"] },
+          ],
+        },
+        { properties: { mode: { type: "string" } } },
+      ],
+      $defs: {
+        Base: { $ref: "#/$defs/Root" },
+        Root: {
+          type: "object",
+          properties: { num: { type: "integer" } },
+          required: ["num"],
+        },
+      },
+    }) as SchemaJson;
+    assert.equal(schema.type, "object");
+    assert.equal(schema.properties.num.type, "integer");
+    assert.equal(schema.properties.str.type, "string");
+    assert.equal(schema.properties.id.type, "string");
+    assert.equal(schema.properties.mode.type, "string");
+    assert.deepEqual([...(schema.required ?? [])].sort(), ["id", "num", "str"]);
+  });
+
+  it("terminates on allOf $ref cycles (including recursive allOf-wrapped $ref properties) and leaves non-object allOf members as an Intersect", () => {
+    const cyclic = convertJsonSchemaToTypebox({
+      allOf: [{ $ref: "#/$defs/A" }],
+      $defs: {
+        A: { allOf: [{ $ref: "#/$defs/B" }] },
+        B: { allOf: [{ $ref: "#/$defs/A" }, { properties: { id: { type: "string" } } }] },
+      },
+    }) as SchemaJson;
+    assert.equal(cyclic.type, "object");
+    assert.equal(cyclic.properties.id.type, "string");
+
+    // Recursive Pydantic/OpenAPI field (`allOf: [{ $ref }]` inside merged properties)
+    // and root `#` self-reference inside `allOf` must terminate without stack overflow.
+    const recursiveNode = convertJsonSchemaToTypebox({
+      type: "object",
+      properties: {
+        start: { allOf: [{ $ref: "#/$defs/Node" }] },
+      },
+      $defs: {
+        Node: {
+          type: "object",
+          properties: {
+            value: { type: "string" },
+            next: {
+              allOf: [{ $ref: "#/$defs/Node" }],
+              description: "Next node in list",
+            },
+          },
+        },
+      },
+    }) as SchemaJson;
+    assert.equal(recursiveNode.properties.start.type, "object");
+    assert.equal(recursiveNode.properties.start.properties.value.type, "string");
+    assert.equal(recursiveNode.properties.start.properties.next.description, "Next node in list");
+
+    const rootCyclicAllOf = convertJsonSchemaToTypebox({
+      type: "object",
+      properties: {
+        self: { allOf: [{ $ref: "#" }] },
+      },
+    }) as SchemaJson;
+    assert.equal(rootCyclicAllOf.type, "object");
+    assert.equal(rootCyclicAllOf.properties.self.type, "object");
+
+    // Junk members and unresolvable $refs are skipped, not fatal; sibling properties on an
+    // unresolvable $ref member still infer an object schema.
+    const mixed = convertJsonSchemaToTypebox({
+      allOf: [
+        "not-a-schema",
+        { $ref: "#/$defs/Missing", properties: { id: { type: "string" } } },
+      ],
+    }) as SchemaJson;
+    assert.equal(mixed.type, "object");
+    assert.equal(mixed.properties.id.type, "string");
+
+    const notObjects = convertJsonSchemaToTypebox({
+      allOf: [{ type: "string" }, { minLength: 2 }],
+    }) as SchemaJson;
+    assert.equal(notObjects.type, undefined, "primitive allOf must stay a bare Intersect");
+    assert.equal(notObjects.properties, undefined);
+    assert.equal(notObjects.allOf.length, 2);
   });
 
   it("resolves $ref to #/$defs/", () => {
