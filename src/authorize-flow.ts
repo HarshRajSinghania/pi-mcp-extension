@@ -9,6 +9,7 @@ import { isSafeAuthorizationUrl } from "./callback-url.js";
 import {
   discoverManualAuthChallenge,
   createHeadersFetch,
+  stripAuthorizationHeader,
   type ManualAuthChallenge,
 } from "./auth-challenge.js";
 import {
@@ -629,16 +630,22 @@ export async function authorize(
     // if empty, which the callback server then rejects as a CSRF error.
     authProvider.setState(oauthState);
 
+    // WHY: `Authorization` belongs to the OAuth flow here. Filter the same set the transport
+    // uses, so this flow's own challenge probe and its SDK `fetchFn` (metadata, registration,
+    // token) never carry a static credential that was configured for the MCP server — the
+    // authorization server is usually a different origin.
+    const staticHeaders = stripAuthorizationHeader(config.headers);
+
     const authChallenge = await discoverChallengeWithFallback({
       serverName,
       serverUrl,
-      headers: config.headers,
+      headers: staticHeaders,
       signal,
     });
     assertActive();
 
     const callbackPromise = registerCallbackPromise(callbackServer, oauthState);
-    const customFetch = config.headers ? createHeadersFetch(config.headers) : undefined;
+    const customFetch = staticHeaders ? createHeadersFetch(staticHeaders) : undefined;
 
     const authResult = await runInitialSdkAuth(
       authProvider,
