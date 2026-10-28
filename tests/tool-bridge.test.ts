@@ -6,7 +6,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ErrorCode, McpError as SdkMcpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { McpError } from "../src/errors.js";
 import type { TSchema } from "typebox";
 import { convertJsonSchemaToTypebox } from "../src/schema-convert.js";
 import { listAllTools } from "../src/tool-discovery.js";
@@ -1304,3 +1306,191 @@ describe("listAllTools pagination", () => {
   });
 });
 
+
+// ── Request-timeout classification (#209) ────────────────────────────────────
+
+describe("ToolBridge request-timeout classification", () => {
+  interface CapturedTool {
+    name: string;
+    execute: (
+      id: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      update: unknown,
+      ctx: unknown,
+    ) => Promise<unknown>;
+  }
+
+  function sdkTimeout(): Error {
+    return SdkMcpError.fromError(ErrorCode.RequestTimeout, "Request timed out", { timeout: 100 });
+  }
+
+  function makeBridge(): { bridge: ToolBridge; tools: CapturedTool[] } {
+    const tools: CapturedTool[] = [];
+    const mockPi = {
+      registerTool: (t: unknown) => tools.push(t as CapturedTool),
+      getActiveTools: () => [] as string[],
+      setActiveTools: () => undefined,
+    };
+    const bridge = new ToolBridge(
+      { toolPrefix: "mcp", requestTimeoutMs: 100, maxRetries: 2 },
+      mockPi,
+    );
+    return { bridge, tools };
+  }
+
+  it("labels a tools/list SDK timeout as 'timeout' so connect retries apply", async () => {
+    const client = {
+      request: async () => {
+        throw sdkTimeout();
+      },
+    };
+    const { bridge } = makeBridge();
+
+    await assert.rejects(
+      () => bridge.refreshTools("srv", client as unknown as Client),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "timeout");
+        assert.match(err.message, /Failed to list tools from srv/);
+        return true;
+      },
+    );
+  });
+
+  it("still labels a non-timeout tools/list failure as 'protocol'", async () => {
+    const client = {
+      request: async () => {
+        throw new Error("Unexpected token < in JSON");
+      },
+    };
+    const { bridge } = makeBridge();
+
+    await assert.rejects(
+      () => bridge.refreshTools("srv", client as unknown as Client),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "protocol");
+        return true;
+      },
+    );
+  });
+
+  it("reports an in-flight abort as a cancellation, not as a timeout", async () => {
+    // Mirror Protocol.request: an abort rejects the request with the SDK's RequestTimeout
+    // error carrying the abort reason, so the bridge must test cancellation first.
+    const client = {
+      request: async (req: { method: string }, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        if (req.method === "tools/list") {
+          return { tools: [{ name: "wait", inputSchema: { type: "object" } }] };
+        }
+        return await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => {
+            reject(SdkMcpError.fromError(ErrorCode.RequestTimeout, "AbortError: This operation was aborted"));
+          });
+        });
+      },
+    };
+    const { bridge, tools } = makeBridge();
+    await bridge.refreshTools("srv", client as unknown as Client);
+    const tool = tools[0];
+    assert.ok(tool);
+
+    const controller = new AbortController();
+    const pending = tool.execute("call-abort", {}, controller.signal, undefined, undefined);
+    setTimeout(() => controller.abort(new Error("AbortError: This operation was aborted")), 10);
+    await assert.rejects(pending, (err: unknown) => {
+      assert.ok(err instanceof McpError);
+      assert.equal(err.code, "protocol");
+      assert.equal(err.message, "Tool execution cancelled");
+      return true;
+    });
+  });
+
+  it("still recognizes an abort-shaped rejection when no signal reaches the bridge", async () => {
+    // WHY: the SDK's abort listener sets signal.aborted before rejecting, so this leg only
+    // fires for a rejection produced by a signal we were never handed — keep it exercised.
+    const client = {
+      request: async (req: { method: string }) => {
+        if (req.method === "tools/list") {
+          return { tools: [{ name: "wait", inputSchema: { type: "object" } }] };
+        }
+        throw SdkMcpError.fromError(ErrorCode.RequestTimeout, "AbortError: This operation was aborted");
+      },
+    };
+    const { bridge, tools } = makeBridge();
+    await bridge.refreshTools("srv", client as unknown as Client);
+    const tool = tools[0];
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool.execute("call-abort-nosignal", {}, undefined, undefined, undefined),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "protocol");
+        assert.equal(err.message, "Tool execution cancelled");
+        return true;
+      },
+    );
+  });
+
+  it("labels a tools/call SDK timeout as 'timeout' and a protocol failure as 'protocol'", async () => {
+    let callError: Error | undefined;
+    const client = {
+      request: async (req: { method: string }) => {
+        if (req.method === "tools/list") {
+          return { tools: [{ name: "do_it", inputSchema: { type: "object" } }] };
+        }
+        throw callError ?? new Error("no error configured");
+      },
+    };
+    const { bridge, tools } = makeBridge();
+    await bridge.refreshTools("srv", client as unknown as Client);
+    const tool = tools[0];
+    assert.ok(tool, "refreshTools must register the discovered tool");
+
+    callError = sdkTimeout();
+    await assert.rejects(
+      () => tool.execute("call-timeout", {}, undefined, undefined, undefined),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "timeout");
+        return true;
+      },
+    );
+
+    callError = new Error("Unexpected token < in JSON");
+    await assert.rejects(
+      () => tool.execute("call-protocol", {}, undefined, undefined, undefined),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "protocol");
+        return true;
+      },
+    );
+  });
+});
+
+describe("ToolBridge error classification does not swallow server JSON-RPC errors", () => {
+  it("keeps a server-side JSON-RPC error whose message mentions a timeout as 'protocol'", async () => {
+    // A server error response carries its own negative JSON-RPC code; only the SDK's own
+    // RequestTimeout (-32001) is a client-side timeout, so the message must not decide.
+    const client = {
+      request: async () => {
+        throw SdkMcpError.fromError(ErrorCode.InternalError, "Upstream query timed out");
+      },
+    };
+    const tools: Array<{ execute: (id: string, params: unknown, s: AbortSignal | undefined, u: unknown, c: unknown) => Promise<unknown> }> = [];
+    const bridge = new ToolBridge(
+      { toolPrefix: "mcp", requestTimeoutMs: 100, maxRetries: 2 },
+      { registerTool: (t: unknown) => tools.push(t as never), getActiveTools: () => [], setActiveTools: () => undefined },
+    );
+    await assert.rejects(
+      () => bridge.refreshTools("srv", client as unknown as Client),
+      (err: unknown) => {
+        assert.ok(err instanceof McpError);
+        assert.equal(err.code, "protocol");
+        return true;
+      },
+    );
+  });
+});
